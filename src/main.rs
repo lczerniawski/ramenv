@@ -2,28 +2,43 @@ use clap::{Args, Parser};
 use env_logger::Env;
 use log::error;
 
+// TODO Key Provider to be installed as a plugin from cargo the same way it is done for pi agent harness
+
 mod commands;
+mod crypto;
+mod models;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "vext",
-    version = "1.0",
+    name = "ramenv",
+    version = "0.1.0",
     about = "Secure Environment Variable Manager"
 )]
 enum Cli {
-    /// Initialize a new secure local vault and setup git ignore
+    /// Initialize a new encrypted vault file in the repository
     Init,
-    /// Set an environment variable in the vault and save it to the local .env file
+    /// Move the existing secrets from the .env file into the encrypted vault file
+    OnBoard,
+    /// Create a new environment
+    CreateEnv(CreateEnvArgs),
+    /// Securely add or update a secret directly inside the encrypted file
     Set(SetArgs),
+    /// Print the decrypted secrets to stdout (useful for debugging)
+    Get(GetArgs),
+    /// Validate the encrypted variables against a schema to catch typos/missing keys
+    Validate(ValidateArgs),
     /// Diff two environments and show the differences
     Diff(DiffArgs),
-    /// Save back the local .env file into the vault
-    Save(SaveArgs),
-    /// Load environment variables from the vault into the local .env file
-    Load(LoadArgs),
-    /// Inject environment variables from the vault into the local environment, without swapping
-    Inject(InjectArgs),
-    // TODO How to add new develoepr
+    /// Decrypt secrets in memory and execute an application process
+    Run(RunArgs),
+    /// Rotate the master encryption key and re-encrypt the file
+    Rotate,
+}
+
+#[derive(Args, Debug)]
+struct CreateEnvArgs {
+    /// Name of the environment to create
+    env: String,
 }
 
 #[derive(Args, Debug)]
@@ -40,6 +55,18 @@ struct SetArgs {
 }
 
 #[derive(Args, Debug)]
+struct GetArgs {
+    /// Environment from which to inject variables to the environment
+    env: String,
+}
+
+#[derive(Args, Debug)]
+struct ValidateArgs {
+    /// Environment from which to inject variables to the environment
+    env: String,
+}
+
+#[derive(Args, Debug)]
 struct DiffArgs {
     /// Environment to diff
     env1: String,
@@ -48,21 +75,7 @@ struct DiffArgs {
 }
 
 #[derive(Args, Debug)]
-struct SaveArgs {
-    /// Environment to save
-    #[arg(short, long)]
-    env: String,
-}
-
-#[derive(Args, Debug)]
-struct LoadArgs {
-    /// Environment to load
-    #[arg(short, long)]
-    env: String,
-}
-
-#[derive(Args, Debug)]
-struct InjectArgs {
+struct RunArgs {
     /// Environment from which to inject variables to the environment
     env: String,
 }
@@ -74,11 +87,14 @@ fn main() {
     let cli = Cli::parse();
     match cli {
         Cli::Init => commands::init_command()
-            .unwrap_or_else(|e| error!("vext command failed with error: {}", e)),
-        Cli::Set(_) => {}
-        Cli::Diff(_) => {}
-        Cli::Save(_) => {}
-        Cli::Load(_) => {}
-        Cli::Inject(_) => {}
+            .unwrap_or_else(|e| error!("ramenv command failed with error: {}", e)),
+        Cli::OnBoard => todo!(),
+        Cli::Set(_) => todo!(),
+        Cli::Get(_) => todo!(),
+        Cli::Validate(_) => todo!(),
+        Cli::Diff(_) => todo!(),
+        Cli::Run(_) => todo!(),
+        Cli::Rotate => todo!(),
+        Cli::CreateEnv(_) => todo!(),
     }
 }
