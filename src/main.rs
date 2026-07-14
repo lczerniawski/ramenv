@@ -28,7 +28,7 @@ enum Cli {
     /// Securely add or update a secret directly inside the encrypted file
     Set(SetArgs),
     /// Print the decrypted secrets to stdout (useful for debugging)
-    Get(GetArgs),
+    List(ListArgs),
     /// Validate the encrypted variables against a schema to catch typos/missing keys
     Validate(ValidateArgs),
     /// Diff two environments and show the differences
@@ -60,9 +60,12 @@ struct SetArgs {
 }
 
 #[derive(Args, Debug)]
-struct GetArgs {
+struct ListArgs {
     /// Environment from which to inject variables to the environment
     env: String,
+    /// Reveal the decrypted values of the secrets (default: false)
+    #[arg(long, default_value_t = false)]
+    reveal: bool,
 }
 
 #[derive(Args, Debug)]
@@ -132,7 +135,18 @@ fn main() {
                 &mut vault_registry,
             )
         }
-        Cli::Get(_) => todo!(),
+        Cli::List(args) => {
+            let encryption_key_service =
+                services::LocalEncryptionKeyService::new(&current_working_path);
+            let vault_registry = services::VaultRegistry::new(&current_working_path);
+
+            commands::list_command(
+                &args.env,
+                args.reveal,
+                &encryption_key_service,
+                &vault_registry,
+            )
+        }
         Cli::Validate(_) => todo!(),
         Cli::Diff(_) => todo!(),
         Cli::Run(_) => todo!(),
