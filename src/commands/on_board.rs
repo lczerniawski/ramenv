@@ -6,7 +6,7 @@ use log::info;
 
 use crate::{crypto, services};
 
-pub fn onboard_command(
+pub fn on_board_command(
     current_working_path: &Path,
     environment: &str,
     encryption_key_service: &impl services::EncryptionKeyService,
@@ -31,10 +31,12 @@ pub fn onboard_command(
     .prompt()
     .context("failed to prompt user for key selection")?;
 
-    let encryption_key = encryption_key_service.key(environment).context(format!(
-        "No encryption key found for environment: {}",
-        environment
-    ))?;
+    let encryption_key = encryption_key_service
+        .env_key(environment)
+        .context(format!(
+            "No encryption key found for environment: {}",
+            environment
+        ))?;
 
     let vault_data: HashMap<String, String> = env_file_data
         .into_iter()
@@ -48,7 +50,7 @@ pub fn onboard_command(
         })
         .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
-    vault_service.merge_vault(environment, vault_data);
+    vault_service.merge_env_vault(environment, vault_data);
     vault_service
         .commit()
         .context("failed to commit configuration into vault file")?;

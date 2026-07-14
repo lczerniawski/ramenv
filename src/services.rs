@@ -4,16 +4,19 @@ use std::{
     process::exit,
 };
 
-use anyhow::Ok;
+use anyhow::{Context, Ok};
 use log::error;
 
-use crate::models;
+use crate::{crypto, models};
 
 pub trait EncryptionKeyService {
-    fn key(&self, environment: &str) -> Option<&str>;
+    fn env_key(&self, environment: &str) -> Option<&str>;
+    fn generate_new_env_key(&mut self, environment: &str);
+    fn commit(&self) -> anyhow::Result<()>;
 }
 
 pub struct LocalEncryptionKeyService {
+    keys_path: PathBuf,
     keys: HashMap<String, String>,
 }
 
@@ -25,7 +28,7 @@ impl LocalEncryptionKeyService {
             exit(1);
         }
 
-        std::fs::read_to_string(keys_file_path)
+        std::fs::read_to_string(keys_file_path.clone())
             .map_err(|e| {
                 error!("Failed to read keys file: {}", e);
                 exit(1);
@@ -40,6 +43,7 @@ impl LocalEncryptionKeyService {
                     .ok()
             })
             .map(|key_file| Self {
+                keys_path: keys_file_path,
                 keys: key_file.keys,
             })
             .unwrap_or_else(|| {
@@ -50,15 +54,36 @@ impl LocalEncryptionKeyService {
 }
 
 impl EncryptionKeyService for LocalEncryptionKeyService {
-    fn key(&self, environemnt: &str) -> Option<&str> {
-        self.keys.get(environemnt).map(|s| s.as_str())
+    fn env_key(&self, environment: &str) -> Option<&str> {
+        self.keys.get(environment).map(|s| s.as_str())
+    }
+
+    fn generate_new_env_key(&mut self, environment: &str) {
+        self.keys
+            .insert(environment.to_string(), crypto::generate_master_key_hex());
+    }
+
+    fn commit(&self) -> anyhow::Result<()> {
+        if !self.keys_path.exists() {
+            anyhow::bail!("Keys file does not exist, please run `ramenv init` first");
+        }
+
+        let new_keys_file_content = models::KeysFile {
+            keys: self.keys.clone(),
+        };
+        let new_keys_file_content =
+            toml::to_string(&new_keys_file_content).context("failed to serialize keys to TOML")?;
+        std::fs::write(&self.keys_path, &new_keys_file_content)
+            .context("failed to write to keys file")?;
+
+        Ok(())
     }
 }
 
 pub trait VaultService {
-    fn vault(&self, environemnt: &str) -> Option<HashMap<String, String>>;
-    fn set_vault(&mut self, environemnt: &str, values: HashMap<String, String>);
-    fn merge_vault(&mut self, environemnt: &str, values: HashMap<String, String>);
+    fn env_vault(&self, environment: &str) -> Option<HashMap<String, String>>;
+    fn set_env_vault(&mut self, environment: &str, values: HashMap<String, String>);
+    fn merge_env_vault(&mut self, environment: &str, values: HashMap<String, String>);
     fn commit(&self) -> anyhow::Result<()>;
 }
 
@@ -101,15 +126,15 @@ impl VaultRegistry {
 }
 
 impl VaultService for VaultRegistry {
-    fn vault(&self, environment: &str) -> Option<HashMap<String, String>> {
+    fn env_vault(&self, environment: &str) -> Option<HashMap<String, String>> {
         self.vaults.get(environment).cloned()
     }
 
-    fn set_vault(&mut self, environment: &str, values: HashMap<String, String>) {
+    fn set_env_vault(&mut self, environment: &str, values: HashMap<String, String>) {
         self.vaults.insert(environment.to_string(), values);
     }
 
-    fn merge_vault(&mut self, environment: &str, values: HashMap<String, String>) {
+    fn merge_env_vault(&mut self, environment: &str, values: HashMap<String, String>) {
         let existing_vault = self.vaults.get_mut(environment).unwrap_or_else(|| {
             error!("Environment not found!");
             exit(1);
@@ -128,8 +153,10 @@ impl VaultService for VaultRegistry {
         let new_vault_file_content = models::VaultFile {
             environemnts: self.vaults.clone(),
         };
-        let serialized_vault = toml::to_string(&new_vault_file_content)?;
-        std::fs::write(&self.vault_path, &serialized_vault)?;
+        let serialized_vault = toml::to_string(&new_vault_file_content)
+            .context("failed to serialize vault file to TOML")?;
+        std::fs::write(&self.vault_path, &serialized_vault)
+            .context("failed to write to vault file")?;
 
         Ok(())
     }

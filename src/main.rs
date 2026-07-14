@@ -5,6 +5,7 @@ use env_logger::Env;
 use log::error;
 
 // TODO Key Provider to be installed as a plugin from cargo the same way it is done for pi agent harness
+// TODO menu -> list of providers, ingredient -> type of provider
 
 mod commands;
 mod crypto;
@@ -106,10 +107,21 @@ fn main() {
                 services::LocalEncryptionKeyService::new(&current_working_path);
             let mut vault_registry = services::VaultRegistry::new(&current_working_path);
 
-            commands::onboard_command(
+            commands::on_board_command(
                 &current_working_path,
                 &args.env,
                 &encryption_key_service,
+                &mut vault_registry,
+            )
+        }
+        Cli::CreateEnv(args) => {
+            let mut encryption_key_service =
+                services::LocalEncryptionKeyService::new(&current_working_path);
+            let mut vault_registry = services::VaultRegistry::new(&current_working_path);
+
+            commands::create_env_command(
+                &args.env,
+                &mut encryption_key_service,
                 &mut vault_registry,
             )
         }
@@ -119,7 +131,6 @@ fn main() {
         Cli::Diff(_) => todo!(),
         Cli::Run(_) => todo!(),
         Cli::Rotate => todo!(),
-        Cli::CreateEnv(_) => todo!(),
     };
 
     if let Err(e) = result {
