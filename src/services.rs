@@ -89,6 +89,8 @@ pub trait VaultService {
 
 pub struct VaultRegistry {
     vault_path: PathBuf,
+    name: String,
+    version: String,
     vaults: HashMap<String, HashMap<String, String>>,
 }
 
@@ -116,6 +118,8 @@ impl VaultRegistry {
             })
             .map(|vault_file| Self {
                 vault_path: vault_file_path,
+                name: vault_file.name,
+                version: vault_file.version,
                 vaults: vault_file.environemnts,
             })
             .unwrap_or_else(|| {
@@ -151,6 +155,8 @@ impl VaultService for VaultRegistry {
         }
 
         let new_vault_file_content = models::VaultFile {
+            name: self.name.clone(),
+            version: self.version.clone(),
             environemnts: self.vaults.clone(),
         };
         let serialized_vault = toml::to_string(&new_vault_file_content)

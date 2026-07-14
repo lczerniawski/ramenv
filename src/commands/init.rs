@@ -14,12 +14,6 @@ pub fn init_command(current_working_path: &Path) -> anyhow::Result<()> {
         _ => {}
     }
 
-    match init_config_file(current_working_path)? {
-        InitStatus::Created => info!("ramenv.toml file created successfully"),
-        InitStatus::Skipped => info!("ramenv.toml file already exists, skipping"),
-        _ => {}
-    }
-
     match init_keys_file(current_working_path)? {
         InitStatus::Created => info!(".ramenv.keys file created successfully"),
         InitStatus::Skipped => info!(".ramenv.keys file already exists, skipping"),
@@ -91,25 +85,6 @@ fn init_gitignore(current_working_path: &Path) -> Result<InitStatus> {
     Ok(InitStatus::Updated)
 }
 
-fn init_config_file(current_working_path: &Path) -> Result<InitStatus> {
-    let main_config_path = current_working_path.join("ramenv.toml");
-    if main_config_path.exists() {
-        return Ok(InitStatus::Skipped);
-    }
-
-    let project_name = current_working_path
-        .file_name()
-        .map(|os_str| os_str.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "unknown_project".to_string());
-    let config = models::ConfigFile::new("1.0.0".to_string(), project_name);
-    let serialized_config =
-        toml::to_string(&config).context("failed to serialize ramenv.toml file")?;
-    std::fs::write(&main_config_path, &serialized_config)
-        .context("failed to write ramenv.toml to disc")?;
-
-    Ok(InitStatus::Created)
-}
-
 fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
     let keys_path = current_working_path.join(".ramenv.keys");
     if keys_path.exists() {
@@ -134,7 +109,11 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
         return Ok(InitStatus::Skipped);
     }
 
-    let mut vault = models::VaultFile::new();
+    let project_name = current_working_path
+        .file_name()
+        .map(|os_str| os_str.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown_project".to_string());
+    let mut vault = models::VaultFile::new("1.0.0".to_string(), project_name);
     vault
         .environemnts
         .insert("development".to_string(), HashMap::new());
