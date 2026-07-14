@@ -57,8 +57,6 @@ struct SetArgs {
     env: String,
     /// Name of the environment variable to set
     key: String,
-    /// Value of the environment variable to set
-    value: String,
 }
 
 #[derive(Args, Debug)]
@@ -130,7 +128,6 @@ fn main() {
             commands::set_command(
                 &args.env,
                 &args.key,
-                &args.value,
                 &encryption_key_service,
                 &mut vault_registry,
             )
