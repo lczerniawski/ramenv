@@ -2,19 +2,21 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, Generate, Key, KeyInit},
 };
-use anyhow::Ok;
+use anyhow::{Context, Ok, Result};
 
 pub fn generate_master_key_hex() -> String {
     let key_bytes = Key::<Aes256Gcm>::generate();
     encode_bytes(key_bytes.to_vec())
 }
 
-pub fn encrypt_value(plaintext: &str, key_hex: &str) -> anyhow::Result<String> {
-    let key_bytes = decode_hex(key_hex)?;
+pub fn encrypt_value(plaintext: &str, key_hex: &str) -> Result<String> {
+    let key_bytes = decode_hex(key_hex).context("failed to decode encryption key")?;
     let cipher = Aes256Gcm::new_from_slice(&key_bytes)?;
 
     let nonce_bytes = Nonce::generate();
-    let mut ciphertext_bytes = cipher.encrypt(&nonce_bytes, plaintext.as_bytes())?;
+    let mut ciphertext_bytes = cipher
+        .encrypt(&nonce_bytes, plaintext.as_bytes())
+        .context("failed to encrypt data")?;
 
     let mut final_payload = nonce_bytes.to_vec();
     final_payload.append(&mut ciphertext_bytes);
@@ -22,10 +24,10 @@ pub fn encrypt_value(plaintext: &str, key_hex: &str) -> anyhow::Result<String> {
     Ok(encode_bytes(final_payload))
 }
 
-pub fn decrypt_value(ciphertext: &str, key_hex: &str) -> anyhow::Result<String> {
-    let key_bytes = decode_hex(key_hex)?;
+pub fn decrypt_value(ciphertext: &str, key_hex: &str) -> Result<String> {
+    let key_bytes = decode_hex(key_hex).context("failed to decode decryption key")?;
     let cipher = Aes256Gcm::new_from_slice(&key_bytes)?;
-    let encrypted_bytes = decode_hex(ciphertext)?;
+    let encrypted_bytes = decode_hex(ciphertext).context("failed to decode encrypted data")?;
 
     if encrypted_bytes.len() < 12 {
         anyhow::bail!("Encrypted data is too short")
@@ -36,7 +38,10 @@ pub fn decrypt_value(ciphertext: &str, key_hex: &str) -> anyhow::Result<String> 
 
     let plaintext_bytes = cipher.decrypt(&nonce, ciphertext_bytes)?;
 
-    Ok(String::from_utf8(plaintext_bytes)?)
+    Ok(
+        String::from_utf8(plaintext_bytes)
+            .context("failed to convert decrypted bytes to string")?,
+    )
 }
 
 fn encode_bytes(bytes: Vec<u8>) -> String {

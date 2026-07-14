@@ -28,3 +28,17 @@ impl KeysFile {
         }
     }
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VaultFile {
+    #[serde(flatten)]
+    pub environemnts: HashMap<String, HashMap<String, String>>,
+}
+
+impl VaultFile {
+    pub fn new() -> Self {
+        Self {
+            environemnts: HashMap::new(),
+        }
+    }
+}

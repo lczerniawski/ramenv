@@ -1,3 +1,5 @@
+use std::process::exit;
+
 use clap::{Args, Parser};
 use env_logger::Env;
 use log::error;
@@ -7,6 +9,7 @@ use log::error;
 mod commands;
 mod crypto;
 mod models;
+mod services;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -18,7 +21,7 @@ enum Cli {
     /// Initialize a new encrypted vault file in the repository
     Init,
     /// Move the existing secrets from the .env file into the encrypted vault file
-    OnBoard,
+    OnBoard(OnBoardArgs),
     /// Create a new environment
     CreateEnv(CreateEnvArgs),
     /// Securely add or update a secret directly inside the encrypted file
@@ -33,6 +36,12 @@ enum Cli {
     Run(RunArgs),
     /// Rotate the master encryption key and re-encrypt the file
     Rotate,
+}
+
+#[derive(Args, Debug)]
+struct OnBoardArgs {
+    /// Environment from which to inject variables to the environment
+    env: String,
 }
 
 #[derive(Args, Debug)]
@@ -84,11 +93,26 @@ fn main() {
     let env = Env::default().filter_or("RUST_LOG", "info");
     env_logger::init_from_env(env);
 
+    let current_working_path = std::env::current_dir().unwrap_or_else(|e| {
+        error!("failed to get current working env {}", e);
+        exit(1);
+    });
+
     let cli = Cli::parse();
-    match cli {
-        Cli::Init => commands::init_command()
-            .unwrap_or_else(|e| error!("ramenv command failed with error: {}", e)),
-        Cli::OnBoard => todo!(),
+    let result = match cli {
+        Cli::Init => commands::init_command(&current_working_path),
+        Cli::OnBoard(args) => {
+            let encryption_key_service =
+                services::LocalEncryptionKeyService::new(&current_working_path);
+            let mut vault_registry = services::VaultRegistry::new(&current_working_path);
+
+            commands::onboard_command(
+                &current_working_path,
+                &args.env,
+                &encryption_key_service,
+                &mut vault_registry,
+            )
+        }
         Cli::Set(_) => todo!(),
         Cli::Get(_) => todo!(),
         Cli::Validate(_) => todo!(),
@@ -96,5 +120,10 @@ fn main() {
         Cli::Run(_) => todo!(),
         Cli::Rotate => todo!(),
         Cli::CreateEnv(_) => todo!(),
+    };
+
+    if let Err(e) = result {
+        error!("ramenv command failed with error:\n{:?}", e);
+        exit(1);
     }
 }
