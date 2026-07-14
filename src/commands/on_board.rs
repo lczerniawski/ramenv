@@ -55,6 +55,6 @@ pub fn on_board_command(
         .commit()
         .context("failed to commit configuration into vault file")?;
 
-    info!("🎉 Vault onboarded successfully!");
+    info!("🎉 vault onboarded successfully!");
     Ok(())
 }

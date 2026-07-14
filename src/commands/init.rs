@@ -32,6 +32,7 @@ pub fn init_command(current_working_path: &Path) -> anyhow::Result<()> {
         _ => {}
     }
 
+    info!("🎉 ramenv initialized successfully!");
     Ok(())
 }
 

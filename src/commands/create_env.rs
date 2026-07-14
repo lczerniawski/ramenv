@@ -29,5 +29,7 @@ pub fn create_env_command(
         .commit()
         .context("failed to synchronize secrets back to file")?;
 
+    info!("successfully created new environment: {}", environment);
+
     Ok(())
 }
