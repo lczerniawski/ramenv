@@ -10,7 +10,12 @@ pub fn create_env_command(
     vault_service: &mut impl services::VaultService,
 ) -> Result<()> {
     if encryption_key_service.env_key(environment).is_some() {
-        info!("provided environment already exists");
+        info!("key for provided environment already exists");
+        exit(1);
+    }
+
+    if vault_service.env_vault(environment).is_some() {
+        info!("vault for provided environment already exists");
         exit(1);
     }
 

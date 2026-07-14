@@ -53,15 +53,12 @@ struct CreateEnvArgs {
 
 #[derive(Args, Debug)]
 struct SetArgs {
+    /// Environment to set the variable in
+    env: String,
     /// Name of the environment variable to set
-    #[arg(short, long)]
     key: String,
     /// Value of the environment variable to set
-    #[arg(short, long)]
     value: String,
-    /// Environment to set the variable in
-    #[arg(short, long)]
-    env: String,
 }
 
 #[derive(Args, Debug)]
@@ -125,7 +122,19 @@ fn main() {
                 &mut vault_registry,
             )
         }
-        Cli::Set(_) => todo!(),
+        Cli::Set(args) => {
+            let encryption_key_service =
+                services::LocalEncryptionKeyService::new(&current_working_path);
+            let mut vault_registry = services::VaultRegistry::new(&current_working_path);
+
+            commands::set_command(
+                &args.env,
+                &args.key,
+                &args.value,
+                &encryption_key_service,
+                &mut vault_registry,
+            )
+        }
         Cli::Get(_) => todo!(),
         Cli::Validate(_) => todo!(),
         Cli::Diff(_) => todo!(),
