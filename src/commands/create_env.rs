@@ -8,11 +8,11 @@ pub fn create_env_command(
     encryption_key_service: &mut impl services::EncryptionKeyService,
     vault_service: &mut impl services::VaultService,
 ) -> Result<()> {
-    if encryption_key_service.env_key(environment).is_some() {
+    if encryption_key_service.env_key(environment).is_ok() {
         anyhow::bail!("key for provided environment already exists")
     }
 
-    if vault_service.env_vault(environment).is_some() {
+    if vault_service.env_vault(environment).is_ok() {
         anyhow::bail!("vault for provided environment already exists");
     }
 

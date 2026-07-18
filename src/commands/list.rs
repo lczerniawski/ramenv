@@ -10,16 +10,8 @@ pub fn list_command(
     encryption_key_service: &impl services::EncryptionKeyService,
     vault_service: &impl services::VaultService,
 ) -> Result<()> {
-    let encryption_key = encryption_key_service.env_key(environment).ok_or_else(|| {
-        anyhow::anyhow!(
-            "key for selected environment does not exist, please run `ramenv create-env` first"
-        )
-    })?;
-    let vault = vault_service.env_vault(environment).ok_or_else(|| {
-        anyhow::anyhow!(
-            "vault for selected environment does not exist, please run `ramenv create-env` first"
-        )
-    })?;
+    let encryption_key = encryption_key_service.env_key(environment)?;
+    let vault = vault_service.env_vault(environment)?;
 
     let mut table = Table::new();
     table.load_preset(UTF8_FULL).set_header(["KEY", "VALUE"]);

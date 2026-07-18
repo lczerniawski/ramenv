@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use crate::{crypto, models, validation::ValidationRule};
 
 pub trait EncryptionKeyService {
-    fn env_key(&self, environment: &str) -> Option<&str>;
+    fn env_key(&self, environment: &str) -> Result<&str>;
     fn generate_new_env_key(&mut self, environment: &str);
     fn commit(&self) -> anyhow::Result<()>;
 }
@@ -42,8 +42,16 @@ impl LocalEncryptionKeyService {
 }
 
 impl EncryptionKeyService for LocalEncryptionKeyService {
-    fn env_key(&self, environment: &str) -> Option<&str> {
-        self.keys.get(environment).map(|s| s.as_str())
+    fn env_key(&self, environment: &str) -> Result<&str> {
+        self.keys
+            .get(environment)
+            .map(|s| s.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "key for {} environment does not exist, please run `ramenv create-env` first",
+                    environment
+                )
+            })
     }
 
     fn generate_new_env_key(&mut self, environment: &str) {
@@ -69,7 +77,7 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
 }
 
 pub trait VaultService {
-    fn env_vault(&self, environment: &str) -> Option<IndexMap<String, String>>;
+    fn env_vault(&self, environment: &str) -> Result<IndexMap<String, String>>;
     fn all_env_vaults(&self) -> IndexMap<String, IndexMap<String, String>>;
     fn set_env_vault(&mut self, environment: &str, values: IndexMap<String, String>);
     fn merge_env_vault(
@@ -119,8 +127,13 @@ impl VaultRegistry {
 }
 
 impl VaultService for VaultRegistry {
-    fn env_vault(&self, environment: &str) -> Option<IndexMap<String, String>> {
-        self.vaults.get(environment).cloned()
+    fn env_vault(&self, environment: &str) -> Result<IndexMap<String, String>> {
+        self.vaults.get(environment).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "vault for {} environment does not exist, please run `ramenv create-env` first",
+                environment
+            )
+        })
     }
 
     fn all_env_vaults(&self) -> IndexMap<String, IndexMap<String, String>> {

@@ -11,31 +11,11 @@ pub fn diff_command(
     encryption_key_service: &impl services::EncryptionKeyService,
     vault_service: &impl services::VaultService,
 ) -> Result<()> {
-    let encryption_key1 = encryption_key_service.env_key(env1).ok_or_else(|| {
-        anyhow::anyhow!(
-            "key for {} environment does not exist, please run `ramenv create-env` first",
-            env1
-        )
-    })?;
-    let vault1 = vault_service.env_vault(env1).ok_or_else(|| {
-        anyhow::anyhow!(
-            "vault for {} environment does not exist, please run `ramenv create-env` first",
-            env1
-        )
-    })?;
+    let encryption_key1 = encryption_key_service.env_key(env1)?;
+    let vault1 = vault_service.env_vault(env1)?;
 
-    let encryption_key2 = encryption_key_service.env_key(env2).ok_or_else(|| {
-        anyhow::anyhow!(
-            "key for {} environment does not exist, please run `ramenv create-env` first",
-            env2
-        )
-    })?;
-    let vault2 = vault_service.env_vault(env2).ok_or_else(|| {
-        anyhow::anyhow!(
-            "vault for {} environment does not exist, please run `ramenv create-env` first",
-            env2
-        )
-    })?;
+    let encryption_key2 = encryption_key_service.env_key(env2)?;
+    let vault2 = vault_service.env_vault(env2)?;
 
     let mut table = Table::new();
     table.load_preset(UTF8_FULL).set_header([

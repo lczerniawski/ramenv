@@ -12,26 +12,13 @@ pub fn validate_command(
     let validation_rules = vault_service.validation_rules();
 
     if let Some(env) = environment {
-        let encryption_key = encryption_key_service.env_key(&env).ok_or_else(|| {
-            anyhow::anyhow!(
-                "key for selected environment does not exist, please run `ramenv create-env` first"
-            )
-        })?;
-        let vault = vault_service.env_vault(&env).ok_or_else(|| {
-            anyhow::anyhow!(
-                "vault for selected environment does not exist, please run `ramenv create-env` first"
-            )
-        })?;
+        let encryption_key = encryption_key_service.env_key(&env)?;
+        let vault = vault_service.env_vault(&env)?;
 
         validate_vault(encryption_key, vault, &validation_rules, env)?;
     } else {
         for (env, vault) in vault_service.all_env_vaults() {
-            let encryption_key = encryption_key_service.env_key(&env).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "key for {} environment does not exist, please run `ramenv create-env` first",
-                    env
-                )
-            })?;
+            let encryption_key = encryption_key_service.env_key(&env)?;
 
             validate_vault(encryption_key, vault, &validation_rules, env)?;
         }

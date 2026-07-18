@@ -13,16 +13,8 @@ pub fn set_command(
     encryption_key_service: &impl services::EncryptionKeyService,
     vault_service: &mut impl services::VaultService,
 ) -> Result<()> {
-    let encryption_key = encryption_key_service.env_key(environment).ok_or_else(|| {
-        anyhow::anyhow!(
-            "key for selected environment does not exist, please run `ramenv create-env` first"
-        )
-    })?;
-    let mut vault = vault_service.env_vault(environment).ok_or_else(|| {
-        anyhow::anyhow!(
-            "vault for selected environment does not exist, please run `ramenv create-env` first"
-        )
-    })?;
+    let encryption_key = encryption_key_service.env_key(environment)?;
+    let mut vault = vault_service.env_vault(environment)?;
     let mut validation_rules = vault_service.validation_rules();
 
     let secret_value = Password::new(&format!("enter secret value for {}:", key))
