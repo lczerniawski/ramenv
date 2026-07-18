@@ -24,7 +24,16 @@ impl Workspace {
             .duration_since(UNIX_EPOCH)
             .expect("time went backwards")
             .as_nanos();
-        path.push(format!("ramenv-validate-{suffix}-{}", std::process::id()));
+        let thread_id = format!("{:?}", std::thread::current().id());
+        let clean_thread_id = thread_id
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>();
+
+        path.push(format!(
+            "ramenv-validate-{suffix}-{clean_thread_id}-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&path).expect("create workspace");
         Self { path }
     }
@@ -154,6 +163,7 @@ fn run_validate_case(
 
 #[test]
 fn validate_command_succeeds_for_selected_env() {
+    let secret = crypto::encrypt_value("secret-value", KEY_HEX).expect("encrypt");
     run_validate_case(
         Some("development"),
         vec![("development", KEY_HEX), ("production", KEY_HEX)],
@@ -168,8 +178,8 @@ fn validate_command_succeeds_for_selected_env() {
             ),
         )],
         vec![
-            ("development", vec![("API_KEY", "secret-value".to_string())]),
-            ("production", vec![("API_KEY", "secret-value".to_string())]),
+            ("development", vec![("API_KEY", secret.clone())]),
+            ("production", vec![("API_KEY", secret)]),
         ],
         true,
         None,
@@ -178,6 +188,7 @@ fn validate_command_succeeds_for_selected_env() {
 
 #[test]
 fn validate_command_succeeds_for_all_envs() {
+    let secret = crypto::encrypt_value("secret-value", KEY_HEX).expect("encrypt");
     run_validate_case(
         None,
         vec![("development", KEY_HEX), ("production", KEY_HEX)],
@@ -192,8 +203,8 @@ fn validate_command_succeeds_for_all_envs() {
             ),
         )],
         vec![
-            ("development", vec![("API_KEY", "secret-value".to_string())]),
-            ("production", vec![("API_KEY", "secret-value".to_string())]),
+            ("development", vec![("API_KEY", secret.clone())]),
+            ("production", vec![("API_KEY", secret)]),
         ],
         true,
         None,

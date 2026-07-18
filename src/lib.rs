@@ -79,8 +79,11 @@ struct ValidateArgs {
 struct DiffArgs {
     /// Environment to diff
     env1: String,
-    /// Environment to diff against
+    /// Environment to diff
     env2: String,
+    /// Reveal the decrypted values of the secrets (default: false)
+    #[arg(long, default_value_t = false)]
+    reveal: bool,
 }
 
 #[derive(Args, Debug)]
@@ -200,7 +203,28 @@ pub fn run_cli() {
 
             commands::validate_command(args.env, &encryption_key_service, &vault_registry)
         }
-        Cli::Diff(_) => todo!(),
+        Cli::Diff(args) => {
+            let encryption_key_service = services::LocalEncryptionKeyService::new(
+                &current_working_path,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to initilize encryption key service: {}", err);
+                exit(1);
+            });
+            let vault_registry = services::VaultRegistry::new(&current_working_path)
+                .unwrap_or_else(|err| {
+                    error!("failed to initialize vault registry: {}", err);
+                    exit(1);
+                });
+
+            commands::diff_command(
+                &args.env1,
+                &args.env2,
+                args.reveal,
+                &encryption_key_service,
+                &vault_registry,
+            )
+        }
         Cli::Run(_) => todo!(),
         Cli::Rotate => todo!(),
     };

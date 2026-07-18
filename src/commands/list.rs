@@ -1,6 +1,8 @@
 use anyhow::Result;
+use comfy_table::{Table, presets::UTF8_FULL};
 
-use crate::{crypto, services};
+use crate::{commands::utils, crypto, services};
+use utils::StringExt;
 
 pub fn list_command(
     environment: &str,
@@ -19,37 +21,24 @@ pub fn list_command(
         )
     })?;
 
-    println!("{:<20} | {:<20}", "KEY", "VALUE");
-    println!("{}", "-".repeat(43));
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL).set_header(["KEY", "VALUE"]);
 
     for (key, value) in vault {
-        let display_value = if value.starts_with("secret:") {
+        let display_value = if value.is_secret() {
             let plaintext = crypto::decrypt_value(&value, encryption_key)?;
             if reveal_secrets {
                 plaintext
             } else {
-                mask_secret(&plaintext)
+                utils::mask_secret(&plaintext)
             }
         } else {
             value
         };
 
-        println!("{:<20} | {:<20}", key, display_value);
+        table.add_row(vec![key, display_value]);
     }
 
+    println!("{table}");
     Ok(())
-}
-
-fn mask_secret(secret: &str) -> String {
-    let len = secret.len();
-
-    if len <= 4 {
-        return "••••".to_string();
-    }
-
-    if len <= 10 {
-        return format!("{}••••{}", &secret[..1], &secret[len - 1..]);
-    }
-
-    format!("{}••••{}", &secret[..4], &secret[len - 4..])
 }

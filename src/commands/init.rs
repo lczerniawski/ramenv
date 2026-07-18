@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::{crypto, models};
 
-pub fn init_command(current_working_path: &Path) -> anyhow::Result<()> {
+pub fn init_command(current_working_path: &Path) -> Result<()> {
     match init_gitignore(current_working_path)? {
         InitStatus::Updated => info!(".gitignore file updated with required files"),
         InitStatus::Skipped => info!("all required files are already in .gitignore"),
@@ -26,7 +26,7 @@ pub fn init_command(current_working_path: &Path) -> anyhow::Result<()> {
         _ => {}
     }
 
-    info!("🎉 ramenv initialized successfully!");
+    info!("🍜 ramenv initialized successfully!");
     Ok(())
 }
 

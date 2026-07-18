@@ -2,7 +2,7 @@ use anyhow::{Ok, Result};
 use indexmap::IndexMap;
 use log::error;
 
-use crate::{crypto, services};
+use crate::{commands::utils::StringExt, crypto, services};
 
 pub fn validate_command(
     environment: Option<String>,
@@ -49,7 +49,7 @@ fn validate_vault(
 
     for (key, rule) in validation_rules.iter() {
         if let Some(value) = vault.get(key) {
-            let value_to_validate = if value.starts_with("secret:") {
+            let value_to_validate = if value.is_secret() {
                 crypto::decrypt_value(value, encryption_key)?
             } else {
                 value.to_string()
