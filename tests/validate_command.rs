@@ -787,7 +787,7 @@ fn validate_command_errors_when_selected_env_key_is_missing() {
         )],
         vec![("development", vec![("API_KEY", "value".to_string())])],
         false,
-        Some("key for selected environment does not exist"),
+        Some("key for development environment does not exist"),
     );
 }
 
@@ -808,7 +808,7 @@ fn validate_command_errors_when_selected_env_vault_is_missing() {
         )],
         vec![],
         false,
-        Some("vault for selected environment does not exist"),
+        Some("vault for development environment does not exist"),
     );
 }
 

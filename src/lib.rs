@@ -11,6 +11,7 @@ mod commands;
 pub mod crypto;
 pub mod models;
 mod services;
+mod utils;
 pub mod validation;
 
 #[derive(Parser, Debug)]
@@ -90,6 +91,8 @@ struct DiffArgs {
 struct RunArgs {
     /// Environment from which to inject variables to the environment
     env: String,
+    /// Command to run after injecting variables
+    command: Vec<String>,
 }
 
 pub fn run_cli() {
@@ -225,7 +228,27 @@ pub fn run_cli() {
                 &vault_registry,
             )
         }
-        Cli::Run(_) => todo!(),
+        Cli::Run(args) => {
+            let encryption_key_service = services::LocalEncryptionKeyService::new(
+                &current_working_path,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to initilize encryption key service: {}", err);
+                exit(1);
+            });
+            let vault_registry = services::VaultRegistry::new(&current_working_path)
+                .unwrap_or_else(|err| {
+                    error!("failed to initialize vault registry: {}", err);
+                    exit(1);
+                });
+
+            commands::run_command(
+                &args.env,
+                &args.command,
+                &encryption_key_service,
+                &vault_registry,
+            )
+        }
         Cli::Rotate => todo!(),
     };
 
