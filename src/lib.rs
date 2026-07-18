@@ -38,7 +38,7 @@ enum Cli {
     /// Decrypt secrets in memory and execute an application process
     Run(RunArgs),
     /// Rotate the master encryption key and re-encrypt the file
-    Rotate,
+    Rotate(RotateArgs),
 }
 
 #[derive(Args, Debug)]
@@ -93,6 +93,12 @@ struct RunArgs {
     env: String,
     /// Command to run after injecting variables
     command: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct RotateArgs {
+    /// Environment to rotate
+    env: String,
 }
 
 pub fn run_cli() {
@@ -249,7 +255,22 @@ pub fn run_cli() {
                 &vault_registry,
             )
         }
-        Cli::Rotate => todo!(),
+        Cli::Rotate(args) => {
+            let mut encryption_key_service = services::LocalEncryptionKeyService::new(
+                &current_working_path,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to initilize encryption key service: {}", err);
+                exit(1);
+            });
+            let mut vault_registry = services::VaultRegistry::new(&current_working_path)
+                .unwrap_or_else(|err| {
+                    error!("failed to initialize vault registry: {}", err);
+                    exit(1);
+                });
+
+            commands::rotate_command(&args.env, &mut encryption_key_service, &mut vault_registry)
+        }
     };
 
     if let Err(e) = result {

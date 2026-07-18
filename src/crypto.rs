@@ -37,9 +37,11 @@ pub fn decrypt_value(ciphertext: &str, key_hex: &str) -> Result<String> {
     }
 
     let (nonce_bytes, ciphertext_bytes) = encrypted_bytes.split_at(12);
-    let nonce = Nonce::try_from(nonce_bytes)?;
+    let nonce = Nonce::try_from(nonce_bytes).context("failed to decode nonce")?;
 
-    let plaintext_bytes = cipher.decrypt(&nonce, ciphertext_bytes)?;
+    let plaintext_bytes = cipher
+        .decrypt(&nonce, ciphertext_bytes)
+        .context("failed to decrypt data")?;
 
     Ok(
         String::from_utf8(plaintext_bytes)

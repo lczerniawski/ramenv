@@ -2,6 +2,7 @@
 name = "ramenv"
 version = "0.1.0"
 edition = "2024"
+default-run = "ramenv"
 
 [[bin]]
 name = "env_printer"
