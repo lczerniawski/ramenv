@@ -91,7 +91,7 @@ fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
         return Ok(InitStatus::Skipped);
     }
 
-    let mut keys = models::KeysFile::new();
+    let mut keys = models::KeysFile::default();
     keys.keys
         .insert("development".to_string(), crypto::generate_master_key_hex());
     keys.keys
