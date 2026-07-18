@@ -1,8 +1,7 @@
 use anyhow::Result;
 use comfy_table::{Table, presets::UTF8_FULL};
 
-use crate::{commands::utils, crypto, services};
-use utils::StringExt;
+use crate::{services, utils};
 
 pub fn list_command(
     environment: &str,
@@ -17,16 +16,8 @@ pub fn list_command(
     table.load_preset(UTF8_FULL).set_header(["KEY", "VALUE"]);
 
     for (key, value) in vault {
-        let display_value = if value.is_secret() {
-            let plaintext = crypto::decrypt_value(&value, encryption_key)?;
-            if reveal_secrets {
-                plaintext
-            } else {
-                utils::mask_secret(&plaintext)
-            }
-        } else {
-            value
-        };
+        let plaintext = utils::get_plaintext(&value, encryption_key)?;
+        let display_value = utils::get_display_value(&plaintext, reveal_secrets)?;
 
         table.add_row(vec![key, display_value]);
     }
