@@ -66,7 +66,7 @@ pub fn on_board_command(
         })
         .collect::<anyhow::Result<IndexMap<_, _>>>()?;
 
-    vault_service.merge_env_vault(environment, vault_data);
+    vault_service.merge_env_vault(environment, vault_data)?;
     vault_service.set_validation_rules(validation_rules);
     vault_service
         .commit()

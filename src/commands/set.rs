@@ -1,8 +1,6 @@
-use std::process::exit;
-
 use anyhow::{Context, Result};
 use inquire::Password;
-use log::{error, info};
+use log::info;
 
 use crate::{
     crypto, services,
@@ -15,21 +13,16 @@ pub fn set_command(
     encryption_key_service: &impl services::EncryptionKeyService,
     vault_service: &mut impl services::VaultService,
 ) -> Result<()> {
-    let encryption_key = encryption_key_service
-        .env_key(environment)
-        .unwrap_or_else(|| {
-            error!(
-                "key for selected environment does not exist, please run `ramenv create-env` first"
-            );
-            exit(1);
-        });
-    // TODO remove exit(1) and switch unwrap_or_else to ok_or_else
-    let mut vault = vault_service.env_vault(environment).unwrap_or_else(|| {
-        error!(
+    let encryption_key = encryption_key_service.env_key(environment).ok_or_else(|| {
+        anyhow::anyhow!(
+            "key for selected environment does not exist, please run `ramenv create-env` first"
+        )
+    })?;
+    let mut vault = vault_service.env_vault(environment).ok_or_else(|| {
+        anyhow::anyhow!(
             "vault for selected environment does not exist, please run `ramenv create-env` first"
-        );
-        exit(1);
-    });
+        )
+    })?;
     let mut validation_rules = vault_service.validation_rules();
 
     let secret_value = Password::new(&format!("enter secret value for {}:", key))
@@ -38,8 +31,7 @@ pub fn set_command(
         .context("failed to safely get the secret value")?;
 
     if secret_value.is_empty() {
-        error!("secret value cannot be empty");
-        exit(1);
+        anyhow::bail!("secret value cannot be empty");
     }
 
     vault.insert(

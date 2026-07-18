@@ -1,5 +1,3 @@
-use std::process::exit;
-
 use crate::services;
 use anyhow::{Context, Ok, Result};
 use indexmap::IndexMap;
@@ -11,13 +9,11 @@ pub fn create_env_command(
     vault_service: &mut impl services::VaultService,
 ) -> Result<()> {
     if encryption_key_service.env_key(environment).is_some() {
-        info!("key for provided environment already exists");
-        exit(1);
+        anyhow::bail!("key for provided environment already exists")
     }
 
     if vault_service.env_vault(environment).is_some() {
-        info!("vault for provided environment already exists");
-        exit(1);
+        anyhow::bail!("vault for provided environment already exists");
     }
 
     encryption_key_service.generate_new_env_key(environment);

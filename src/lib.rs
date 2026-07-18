@@ -102,9 +102,18 @@ pub fn run_cli() {
     let result = match cli {
         Cli::Init => commands::init_command(&current_working_path),
         Cli::Onboard(args) => {
-            let encryption_key_service =
-                services::LocalEncryptionKeyService::new(&current_working_path);
-            let mut vault_registry = services::VaultRegistry::new(&current_working_path);
+            let encryption_key_service = services::LocalEncryptionKeyService::new(
+                &current_working_path,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to initilize encryption key service: {}", err);
+                exit(1);
+            });
+            let mut vault_registry = services::VaultRegistry::new(&current_working_path)
+                .unwrap_or_else(|err| {
+                    error!("failed to initialize vault registry: {}", err);
+                    exit(1);
+                });
 
             commands::on_board_command(
                 &current_working_path,
@@ -114,9 +123,18 @@ pub fn run_cli() {
             )
         }
         Cli::CreateEnv(args) => {
-            let mut encryption_key_service =
-                services::LocalEncryptionKeyService::new(&current_working_path);
-            let mut vault_registry = services::VaultRegistry::new(&current_working_path);
+            let mut encryption_key_service = services::LocalEncryptionKeyService::new(
+                &current_working_path,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to initilize encryption key service: {}", err);
+                exit(1);
+            });
+            let mut vault_registry = services::VaultRegistry::new(&current_working_path)
+                .unwrap_or_else(|err| {
+                    error!("failed to initialize vault registry: {}", err);
+                    exit(1);
+                });
 
             commands::create_env_command(
                 &args.env,
@@ -125,9 +143,18 @@ pub fn run_cli() {
             )
         }
         Cli::Set(args) => {
-            let encryption_key_service =
-                services::LocalEncryptionKeyService::new(&current_working_path);
-            let mut vault_registry = services::VaultRegistry::new(&current_working_path);
+            let encryption_key_service = services::LocalEncryptionKeyService::new(
+                &current_working_path,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to initilize encryption key service: {}", err);
+                exit(1);
+            });
+            let mut vault_registry = services::VaultRegistry::new(&current_working_path)
+                .unwrap_or_else(|err| {
+                    error!("failed to initialize vault registry: {}", err);
+                    exit(1);
+                });
 
             commands::set_command(
                 &args.env,
@@ -137,9 +164,18 @@ pub fn run_cli() {
             )
         }
         Cli::List(args) => {
-            let encryption_key_service =
-                services::LocalEncryptionKeyService::new(&current_working_path);
-            let vault_registry = services::VaultRegistry::new(&current_working_path);
+            let encryption_key_service = services::LocalEncryptionKeyService::new(
+                &current_working_path,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to initilize encryption key service: {}", err);
+                exit(1);
+            });
+            let vault_registry = services::VaultRegistry::new(&current_working_path)
+                .unwrap_or_else(|err| {
+                    error!("failed to initialize vault registry: {}", err);
+                    exit(1);
+                });
 
             commands::list_command(
                 &args.env,
@@ -149,9 +185,18 @@ pub fn run_cli() {
             )
         }
         Cli::Validate(args) => {
-            let encryption_key_service =
-                services::LocalEncryptionKeyService::new(&current_working_path);
-            let vault_registry = services::VaultRegistry::new(&current_working_path);
+            let encryption_key_service = services::LocalEncryptionKeyService::new(
+                &current_working_path,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to initilize encryption key service: {}", err);
+                exit(1);
+            });
+            let vault_registry = services::VaultRegistry::new(&current_working_path)
+                .unwrap_or_else(|err| {
+                    error!("failed to initialize vault registry: {}", err);
+                    exit(1);
+                });
 
             commands::validate_command(args.env, &encryption_key_service, &vault_registry)
         }
