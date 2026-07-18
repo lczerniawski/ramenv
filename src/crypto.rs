@@ -21,13 +21,16 @@ pub fn encrypt_value(plaintext: &str, key_hex: &str) -> Result<String> {
     let mut final_payload = nonce_bytes.to_vec();
     final_payload.append(&mut ciphertext_bytes);
 
-    Ok(encode_bytes(final_payload))
+    Ok(format!("secret:{}", encode_bytes(final_payload)))
 }
 
 pub fn decrypt_value(ciphertext: &str, key_hex: &str) -> Result<String> {
+    let raw_hex = ciphertext
+        .strip_prefix("secret:")
+        .context("Missing required 'secret:' prefix")?;
     let key_bytes = decode_hex(key_hex).context("failed to decode decryption key")?;
     let cipher = Aes256Gcm::new_from_slice(&key_bytes)?;
-    let encrypted_bytes = decode_hex(ciphertext).context("failed to decode encrypted data")?;
+    let encrypted_bytes = decode_hex(raw_hex).context("failed to decode encrypted data")?;
 
     if encrypted_bytes.len() < 12 {
         anyhow::bail!("Encrypted data is too short")

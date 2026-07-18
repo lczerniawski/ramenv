@@ -1,7 +1,8 @@
-use std::{collections::HashMap, process::exit};
+use std::process::exit;
 
 use crate::services;
 use anyhow::{Context, Ok, Result};
+use indexmap::IndexMap;
 use log::info;
 
 pub fn create_env_command(
@@ -24,7 +25,7 @@ pub fn create_env_command(
         .commit()
         .context("failed to synchronize keys back to file")?;
 
-    vault_service.set_env_vault(environment, HashMap::new());
+    vault_service.set_env_vault(environment, IndexMap::new());
     vault_service
         .commit()
         .context("failed to synchronize secrets back to file")?;

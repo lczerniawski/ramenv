@@ -1,6 +1,6 @@
 use anyhow::{Context, Ok, Result};
+use indexmap::IndexMap;
 use log::info;
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -115,11 +115,11 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
         .unwrap_or_else(|| "unknown_project".to_string());
     let mut vault = models::VaultFile::new("1.0.0".to_string(), project_name);
     vault
-        .environemnts
-        .insert("development".to_string(), HashMap::new());
+        .environments
+        .insert("development".to_string(), IndexMap::new());
     vault
-        .environemnts
-        .insert("production".to_string(), HashMap::new());
+        .environments
+        .insert("production".to_string(), IndexMap::new());
 
     let serialized_vault = toml::to_string(&vault)?;
     std::fs::write(&vault_path, &serialized_vault)?;

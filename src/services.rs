@@ -1,13 +1,13 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     process::exit,
 };
 
 use anyhow::{Context, Ok};
+use indexmap::IndexMap;
 use log::error;
 
-use crate::{crypto, models};
+use crate::{crypto, models, validation::ValidationRule};
 
 pub trait EncryptionKeyService {
     fn env_key(&self, environment: &str) -> Option<&str>;
@@ -17,7 +17,7 @@ pub trait EncryptionKeyService {
 
 pub struct LocalEncryptionKeyService {
     keys_path: PathBuf,
-    keys: HashMap<String, String>,
+    keys: IndexMap<String, String>,
 }
 
 impl LocalEncryptionKeyService {
@@ -81,9 +81,12 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
 }
 
 pub trait VaultService {
-    fn env_vault(&self, environment: &str) -> Option<HashMap<String, String>>;
-    fn set_env_vault(&mut self, environment: &str, values: HashMap<String, String>);
-    fn merge_env_vault(&mut self, environment: &str, values: HashMap<String, String>);
+    fn env_vault(&self, environment: &str) -> Option<IndexMap<String, String>>;
+    fn all_env_vaults(&self) -> IndexMap<String, IndexMap<String, String>>;
+    fn set_env_vault(&mut self, environment: &str, values: IndexMap<String, String>);
+    fn merge_env_vault(&mut self, environment: &str, values: IndexMap<String, String>);
+    fn validation_rules(&self) -> IndexMap<String, ValidationRule>;
+    fn set_validation_rules(&mut self, rules: IndexMap<String, ValidationRule>);
     fn commit(&self) -> anyhow::Result<()>;
 }
 
@@ -91,7 +94,8 @@ pub struct VaultRegistry {
     vault_path: PathBuf,
     name: String,
     version: String,
-    vaults: HashMap<String, HashMap<String, String>>,
+    validation: IndexMap<String, ValidationRule>,
+    vaults: IndexMap<String, IndexMap<String, String>>,
 }
 
 impl VaultRegistry {
@@ -120,7 +124,8 @@ impl VaultRegistry {
                 vault_path: vault_file_path,
                 name: vault_file.name,
                 version: vault_file.version,
-                vaults: vault_file.environemnts,
+                validation: vault_file.validation,
+                vaults: vault_file.environments,
             })
             .unwrap_or_else(|| {
                 error!("Failed to initialize VaultService");
@@ -130,15 +135,19 @@ impl VaultRegistry {
 }
 
 impl VaultService for VaultRegistry {
-    fn env_vault(&self, environment: &str) -> Option<HashMap<String, String>> {
+    fn env_vault(&self, environment: &str) -> Option<IndexMap<String, String>> {
         self.vaults.get(environment).cloned()
     }
 
-    fn set_env_vault(&mut self, environment: &str, values: HashMap<String, String>) {
+    fn all_env_vaults(&self) -> IndexMap<String, IndexMap<String, String>> {
+        self.vaults.clone()
+    }
+
+    fn set_env_vault(&mut self, environment: &str, values: IndexMap<String, String>) {
         self.vaults.insert(environment.to_string(), values);
     }
 
-    fn merge_env_vault(&mut self, environment: &str, values: HashMap<String, String>) {
+    fn merge_env_vault(&mut self, environment: &str, values: IndexMap<String, String>) {
         let existing_vault = self.vaults.get_mut(environment).unwrap_or_else(|| {
             error!("Environment not found!");
             exit(1);
@@ -157,7 +166,8 @@ impl VaultService for VaultRegistry {
         let new_vault_file_content = models::VaultFile {
             name: self.name.clone(),
             version: self.version.clone(),
-            environemnts: self.vaults.clone(),
+            validation: self.validation.clone(),
+            environments: self.vaults.clone(),
         };
         let serialized_vault = toml::to_string(&new_vault_file_content)
             .context("failed to serialize vault file to TOML")?;
@@ -165,5 +175,13 @@ impl VaultService for VaultRegistry {
             .context("failed to write to vault file")?;
 
         Ok(())
+    }
+
+    fn validation_rules(&self) -> IndexMap<String, ValidationRule> {
+        self.validation.clone()
+    }
+
+    fn set_validation_rules(&mut self, rules: IndexMap<String, ValidationRule>) {
+        self.validation = rules;
     }
 }

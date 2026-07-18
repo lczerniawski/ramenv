@@ -1,15 +1,17 @@
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+
+use crate::validation::ValidationRule;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeysFile {
-    pub keys: HashMap<String, String>,
+    pub keys: IndexMap<String, String>,
 }
 
-impl KeysFile {
-    pub fn new() -> Self {
+impl Default for KeysFile {
+    fn default() -> Self {
         Self {
-            keys: HashMap::new(),
+            keys: IndexMap::new(),
         }
     }
 }
@@ -18,8 +20,8 @@ impl KeysFile {
 pub struct VaultFile {
     pub name: String,
     pub version: String,
-    #[serde(flatten)]
-    pub environemnts: HashMap<String, HashMap<String, String>>,
+    pub validation: IndexMap<String, ValidationRule>,
+    pub environments: IndexMap<String, IndexMap<String, String>>,
 }
 
 impl VaultFile {
@@ -27,7 +29,8 @@ impl VaultFile {
         Self {
             name: project_name,
             version,
-            environemnts: HashMap::new(),
+            validation: IndexMap::new(),
+            environments: IndexMap::new(),
         }
     }
 }

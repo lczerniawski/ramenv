@@ -30,11 +30,15 @@ pub fn list_command(
     println!("{}", "-".repeat(43));
 
     for (key, value) in vault {
-        let plaintext = crypto::decrypt_value(&value, encryption_key)?;
-        let display_value = if reveal_secrets {
-            plaintext
+        let display_value = if value.starts_with("secret:") {
+            let plaintext = crypto::decrypt_value(&value, encryption_key)?;
+            if reveal_secrets {
+                plaintext
+            } else {
+                mask_secret(&plaintext)
+            }
         } else {
-            mask_secret(&plaintext)
+            value
         };
 
         println!("{:<20} | {:<20}", key, display_value);

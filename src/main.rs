@@ -11,6 +11,7 @@ mod commands;
 mod crypto;
 mod models;
 mod services;
+mod validation;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -22,7 +23,7 @@ enum Cli {
     /// Initialize a new encrypted vault file in the repository
     Init,
     /// Move the existing secrets from the .env file into the encrypted vault file
-    OnBoard(OnBoardArgs),
+    Onboard(OnboardArgs),
     /// Create a new environment
     CreateEnv(CreateEnvArgs),
     /// Securely add or update a secret directly inside the encrypted file
@@ -40,7 +41,7 @@ enum Cli {
 }
 
 #[derive(Args, Debug)]
-struct OnBoardArgs {
+struct OnboardArgs {
     /// Environment from which to inject variables to the environment
     env: String,
 }
@@ -71,7 +72,7 @@ struct ListArgs {
 #[derive(Args, Debug)]
 struct ValidateArgs {
     /// Environment from which to inject variables to the environment
-    env: String,
+    env: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -100,7 +101,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli {
         Cli::Init => commands::init_command(&current_working_path),
-        Cli::OnBoard(args) => {
+        Cli::Onboard(args) => {
             let encryption_key_service =
                 services::LocalEncryptionKeyService::new(&current_working_path);
             let mut vault_registry = services::VaultRegistry::new(&current_working_path);
@@ -147,7 +148,13 @@ fn main() {
                 &vault_registry,
             )
         }
-        Cli::Validate(_) => todo!(),
+        Cli::Validate(args) => {
+            let encryption_key_service =
+                services::LocalEncryptionKeyService::new(&current_working_path);
+            let vault_registry = services::VaultRegistry::new(&current_working_path);
+
+            commands::validate_command(args.env, &encryption_key_service, &vault_registry)
+        }
         Cli::Diff(_) => todo!(),
         Cli::Run(_) => todo!(),
         Cli::Rotate => todo!(),

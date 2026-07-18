@@ -9,7 +9,10 @@ anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
 dotenvy = "0.15.7"
 env_logger = "0.11.10"
+indexmap = { version = "2.14.0", features = ["serde"] }
 inquire = "0.9.4"
 log = "0.4.33"
+regex = "1.13.1"
 serde = { version = "1.0.228", features = ["derive"] }
-toml = "1.1.2"
+toml = { version = "1.1.2", features = ["preserve_order"] }
+url = "2.5.8"
