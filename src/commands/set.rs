@@ -31,19 +31,21 @@ pub fn set_command(
         crypto::encrypt_value(&secret_value, encryption_key)
             .context("failed to encrypt provided value")?,
     );
-    // TODO if we set key for second time, we shouldn't override the validation rule, we should check if it exists and if it does, we should keep it
-    validation_rules.insert(
-        key.to_string(),
-        ValidationRule::new(
-            RuleType::String {
-                min_len: None,
-                max_len: None,
-            },
-            true,
-        ),
-    );
+    if !validation_rules.contains_key(key) {
+        validation_rules.insert(
+            key.to_string(),
+            ValidationRule::new(
+                RuleType::String {
+                    min_len: None,
+                    max_len: None,
+                },
+                true,
+            ),
+        );
 
-    vault_service.set_validation_rules(validation_rules);
+        vault_service.set_validation_rules(validation_rules);
+    }
+
     vault_service.set_env_vault(environment, vault);
     vault_service.commit()?;
 
