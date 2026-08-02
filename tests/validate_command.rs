@@ -101,8 +101,6 @@ fn write_vault_file(
         .collect::<IndexMap<_, _>>();
 
     let vault = VaultFile {
-        name: "ramenv".to_string(),
-        version: "1.0.0".to_string(),
         validation,
         environments,
     };

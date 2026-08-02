@@ -5,9 +5,23 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
-use crate::{crypto, models};
+use crate::{InitTarget, crypto, models};
 
-pub fn init_command(current_working_path: &Path) -> Result<()> {
+pub fn init_command(current_working_path: &Path, init_target: Option<InitTarget>) -> Result<()> {
+    match init_target {
+        Some(InitTarget::Workspace) => init_workspace(current_working_path)?,
+        Some(InitTarget::Service) => init_service(current_working_path)?,
+        None => {
+            init_workspace(current_working_path)?;
+            init_service(current_working_path)?;
+        }
+    }
+
+    info!("🍜 ramenv initialized successfully!");
+    Ok(())
+}
+
+fn init_workspace(current_working_path: &Path) -> Result<()> {
     match init_gitignore(current_working_path)? {
         InitStatus::Updated => info!(".gitignore file updated with required files"),
         InitStatus::Skipped => info!("all required files are already in .gitignore"),
@@ -20,13 +34,24 @@ pub fn init_command(current_working_path: &Path) -> Result<()> {
         _ => {}
     }
 
+    match init_workspace_file(current_working_path)? {
+        InitStatus::Created => info!(".ramenv.workspace.toml file created successfully"),
+        InitStatus::Skipped => {
+            info!(".ramenv.workspace.toml file already exists, skipping")
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn init_service(current_working_path: &Path) -> Result<()> {
     match init_vault_file(current_working_path)? {
         InitStatus::Created => info!(".ramenv.vault.toml file created successfully"),
         InitStatus::Skipped => info!(".ramenv.vault.toml file already exists, skipping"),
         _ => {}
     }
 
-    info!("🍜 ramenv initialized successfully!");
     Ok(())
 }
 
@@ -109,11 +134,7 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
         return Ok(InitStatus::Skipped);
     }
 
-    let project_name = current_working_path
-        .file_name()
-        .map(|os_str| os_str.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "unknown_project".to_string());
-    let mut vault = models::VaultFile::new("1.0.0".to_string(), project_name);
+    let mut vault = models::VaultFile::default();
     vault
         .environments
         .insert("development".to_string(), IndexMap::new());
@@ -123,6 +144,24 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
 
     let serialized_vault = toml::to_string(&vault)?;
     std::fs::write(&vault_path, &serialized_vault)?;
+
+    Ok(InitStatus::Created)
+}
+
+fn init_workspace_file(current_working_path: &Path) -> Result<InitStatus> {
+    let workspace_path = current_working_path.join(".ramenv.workspace.toml");
+    if (workspace_path).exists() {
+        return Ok(InitStatus::Skipped);
+    }
+
+    let project_name = current_working_path
+        .file_name()
+        .map(|os_str| os_str.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown_project".to_string());
+
+    let workspace = models::WorkspaceFile::new("1".to_string(), project_name);
+    let serialized_workspace = toml::to_string(&workspace)?;
+    std::fs::write(&workspace_path, &serialized_workspace)?;
 
     Ok(InitStatus::Created)
 }

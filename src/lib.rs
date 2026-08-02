@@ -1,8 +1,13 @@
+use std::path::Path;
 use std::process::exit;
 
-use clap::{Args, Parser};
+use anyhow::Context;
+use anyhow::Ok;
+use anyhow::Result;
+use clap::{Args, Parser, Subcommand};
 use env_logger::Env;
 use log::error;
+use services::WorkspaceService;
 
 // TODO Key Provider to be installed as a plugin from cargo the same way it is done for pi agent harness
 // TODO menu -> list of providers, ingredient -> type of provider
@@ -21,8 +26,15 @@ pub mod validation;
     about = "Secure Environment Variable Manager"
 )]
 enum Cli {
-    /// Initialize a new encrypted vault file in the repository
-    Init,
+    /// Initialize ramenv (creates workspace + vault if no target specified)
+    ///
+    /// Single repo: `ramenv init` (creates all files in current dir)
+    /// Monorepo: `ramenv init workspace` at root, then `ramenv init service` in each service
+    Init {
+        /// Target to initialize: workspace (keys + metadata) or service (vault only)
+        #[command(subcommand)]
+        target: Option<InitTarget>,
+    },
     /// Move the existing secrets from the .env file into the encrypted vault file
     Onboard(OnboardArgs),
     /// Create a new environment
@@ -39,6 +51,16 @@ enum Cli {
     Run(RunArgs),
     /// Rotate the master encryption key and re-encrypt the file
     Rotate(RotateArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum InitTarget {
+    /// Initialize workspace (.ramenv.workspace.toml + .ramenv.keys)
+    /// Use at monorepo root - keys are shared by all services
+    Workspace,
+    /// Initialize service vault (.ramenv.vault.toml)
+    /// Use in each service dir - stores service-specific encrypted secrets
+    Service,
 }
 
 #[derive(Args, Debug)]
@@ -112,18 +134,11 @@ pub fn run_cli() {
 
     let cli = Cli::parse();
     let result = match cli {
-        Cli::Init => commands::init_command(&current_working_path),
+        Cli::Init { target } => commands::init_command(&current_working_path, target),
         Cli::Onboard(args) => {
-            let encryption_key_service = services::LocalEncryptionKeyService::new(
-                &current_working_path,
-            )
-            .unwrap_or_else(|err| {
-                error!("failed to initilize encryption key service: {}", err);
-                exit(1);
-            });
-            let mut vault_registry = services::VaultRegistry::new(&current_working_path)
-                .unwrap_or_else(|err| {
-                    error!("failed to initialize vault registry: {}", err);
+            let (encryption_key_service, mut vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize services: {}", err);
                     exit(1);
                 });
 
@@ -131,40 +146,22 @@ pub fn run_cli() {
                 &current_working_path,
                 &args.env,
                 &encryption_key_service,
-                &mut vault_registry,
+                &mut vault_service,
             )
         }
         Cli::CreateEnv(args) => {
-            let mut encryption_key_service = services::LocalEncryptionKeyService::new(
-                &current_working_path,
-            )
-            .unwrap_or_else(|err| {
-                error!("failed to initilize encryption key service: {}", err);
-                exit(1);
-            });
-            let mut vault_registry = services::VaultRegistry::new(&current_working_path)
-                .unwrap_or_else(|err| {
-                    error!("failed to initialize vault registry: {}", err);
+            let (mut encryption_key_service, mut vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize services: {}", err);
                     exit(1);
                 });
 
-            commands::create_env_command(
-                &args.env,
-                &mut encryption_key_service,
-                &mut vault_registry,
-            )
+            commands::create_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
         }
         Cli::Set(args) => {
-            let encryption_key_service = services::LocalEncryptionKeyService::new(
-                &current_working_path,
-            )
-            .unwrap_or_else(|err| {
-                error!("failed to initilize encryption key service: {}", err);
-                exit(1);
-            });
-            let mut vault_registry = services::VaultRegistry::new(&current_working_path)
-                .unwrap_or_else(|err| {
-                    error!("failed to initialize vault registry: {}", err);
+            let (encryption_key_service, mut vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize services: {}", err);
                     exit(1);
                 });
 
@@ -172,20 +169,13 @@ pub fn run_cli() {
                 &args.env,
                 &args.key,
                 &encryption_key_service,
-                &mut vault_registry,
+                &mut vault_service,
             )
         }
         Cli::List(args) => {
-            let encryption_key_service = services::LocalEncryptionKeyService::new(
-                &current_working_path,
-            )
-            .unwrap_or_else(|err| {
-                error!("failed to initilize encryption key service: {}", err);
-                exit(1);
-            });
-            let vault_registry = services::VaultRegistry::new(&current_working_path)
-                .unwrap_or_else(|err| {
-                    error!("failed to initialize vault registry: {}", err);
+            let (encryption_key_service, vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize services: {}", err);
                     exit(1);
                 });
 
@@ -193,36 +183,22 @@ pub fn run_cli() {
                 &args.env,
                 args.reveal,
                 &encryption_key_service,
-                &vault_registry,
+                &vault_service,
             )
         }
         Cli::Validate(args) => {
-            let encryption_key_service = services::LocalEncryptionKeyService::new(
-                &current_working_path,
-            )
-            .unwrap_or_else(|err| {
-                error!("failed to initilize encryption key service: {}", err);
-                exit(1);
-            });
-            let vault_registry = services::VaultRegistry::new(&current_working_path)
-                .unwrap_or_else(|err| {
-                    error!("failed to initialize vault registry: {}", err);
+            let (encryption_key_service, vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize services: {}", err);
                     exit(1);
                 });
 
-            commands::validate_command(args.env, &encryption_key_service, &vault_registry)
+            commands::validate_command(args.env, &encryption_key_service, &vault_service)
         }
         Cli::Diff(args) => {
-            let encryption_key_service = services::LocalEncryptionKeyService::new(
-                &current_working_path,
-            )
-            .unwrap_or_else(|err| {
-                error!("failed to initilize encryption key service: {}", err);
-                exit(1);
-            });
-            let vault_registry = services::VaultRegistry::new(&current_working_path)
-                .unwrap_or_else(|err| {
-                    error!("failed to initialize vault registry: {}", err);
+            let (encryption_key_service, vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize services: {}", err);
                     exit(1);
                 });
 
@@ -231,20 +207,13 @@ pub fn run_cli() {
                 &args.env2,
                 args.reveal,
                 &encryption_key_service,
-                &vault_registry,
+                &vault_service,
             )
         }
         Cli::Run(args) => {
-            let encryption_key_service = services::LocalEncryptionKeyService::new(
-                &current_working_path,
-            )
-            .unwrap_or_else(|err| {
-                error!("failed to initilize encryption key service: {}", err);
-                exit(1);
-            });
-            let vault_registry = services::VaultRegistry::new(&current_working_path)
-                .unwrap_or_else(|err| {
-                    error!("failed to initialize vault registry: {}", err);
+            let (encryption_key_service, vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize services: {}", err);
                     exit(1);
                 });
 
@@ -252,24 +221,17 @@ pub fn run_cli() {
                 &args.env,
                 &args.command,
                 &encryption_key_service,
-                &vault_registry,
+                &vault_service,
             )
         }
         Cli::Rotate(args) => {
-            let mut encryption_key_service = services::LocalEncryptionKeyService::new(
-                &current_working_path,
-            )
-            .unwrap_or_else(|err| {
-                error!("failed to initilize encryption key service: {}", err);
-                exit(1);
-            });
-            let mut vault_registry = services::VaultRegistry::new(&current_working_path)
-                .unwrap_or_else(|err| {
-                    error!("failed to initialize vault registry: {}", err);
+            let (mut encryption_key_service, mut vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize services: {}", err);
                     exit(1);
                 });
 
-            commands::rotate_command(&args.env, &mut encryption_key_service, &mut vault_registry)
+            commands::rotate_command(&args.env, &mut encryption_key_service, &mut vault_service)
         }
     };
 
@@ -277,4 +239,21 @@ pub fn run_cli() {
         error!("ramenv command failed with error:\n{:?}", e);
         exit(1);
     }
+}
+
+fn initialize_services(
+    current_working_path: &Path,
+) -> Result<(
+    impl services::EncryptionKeyService,
+    impl services::VaultService,
+)> {
+    let workspace_registry = services::WorkspaceRegistry::new(current_working_path)
+        .context("failed to initialize workspace registry")?;
+    let encryption_key_service =
+        services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())
+            .context("failed to initilize encryption key service")?;
+    let vault_registry = services::VaultRegistry::new(current_working_path)
+        .context("failed to initialize vault registry")?;
+
+    Ok((encryption_key_service, vault_registry))
 }

@@ -17,18 +17,18 @@ pub struct LocalEncryptionKeyService {
 }
 
 impl LocalEncryptionKeyService {
-    pub fn new(current_working_path: &Path) -> Result<Self> {
-        let keys_file_path = current_working_path.join(".ramenv.keys");
+    pub fn new(workspace_root: &Path) -> Result<Self> {
+        let keys_file_path = workspace_root.join(".ramenv.keys");
         if !keys_file_path.exists() {
-            anyhow::bail!("Keys file does not exist, please run `ramenv init` first");
+            anyhow::bail!("keys file does not exist, please run `ramenv init` first");
         }
 
         std::fs::read_to_string(keys_file_path.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to read keys file: {}", e))
+            .map_err(|e| anyhow::anyhow!("failed to read keys file: {}", e))
             .ok()
             .and_then(|content| {
                 toml::from_str::<models::KeysFile>(&content)
-                    .map_err(|e| anyhow::anyhow!("Failed to parse keys file: {}", e))
+                    .map_err(|e| anyhow::anyhow!("failed to parse keys file: {}", e))
                     .ok()
             })
             .map(|key_file| {
@@ -37,7 +37,7 @@ impl LocalEncryptionKeyService {
                     keys: key_file.keys,
                 })
             })
-            .unwrap_or_else(|| anyhow::bail!("Failed to initialize EncryptionKeyService"))
+            .unwrap_or_else(|| anyhow::bail!("failed to initialize encryption key service"))
     }
 }
 
@@ -61,7 +61,7 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
 
     fn commit(&self) -> anyhow::Result<()> {
         if !self.keys_path.exists() {
-            anyhow::bail!("Keys file does not exist, please run `ramenv init` first");
+            anyhow::bail!("keys file does not exist, please run `ramenv init` first");
         }
 
         let new_keys_file_content = models::KeysFile {
@@ -92,8 +92,6 @@ pub trait VaultService {
 
 pub struct VaultRegistry {
     vault_path: PathBuf,
-    name: String,
-    version: String,
     validation: IndexMap<String, ValidationRule>,
     vaults: IndexMap<String, IndexMap<String, String>>,
 }
@@ -102,27 +100,25 @@ impl VaultRegistry {
     pub fn new(current_working_path: &Path) -> Result<Self> {
         let vault_file_path = Path::new(current_working_path).join(".ramenv.vault.toml");
         if !vault_file_path.exists() {
-            anyhow::bail!("Vault file does not exist, please run `ramenv init` first");
+            anyhow::bail!("vault file does not exist, please run `ramenv init` first");
         }
 
         std::fs::read_to_string(vault_file_path.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to read vault file: {}", e))
+            .map_err(|e| anyhow::anyhow!("failed to read vault file: {}", e))
             .ok()
             .and_then(|content| {
                 toml::from_str::<models::VaultFile>(content.as_str())
-                    .map_err(|e| anyhow::anyhow!("Failed to parse vault file: {}", e))
+                    .map_err(|e| anyhow::anyhow!("failed to parse vault file: {}", e))
                     .ok()
             })
             .map(|vault_file| {
                 Ok(Self {
                     vault_path: vault_file_path,
-                    name: vault_file.name,
-                    version: vault_file.version,
                     validation: vault_file.validation,
                     vaults: vault_file.environments,
                 })
             })
-            .unwrap_or_else(|| anyhow::bail!("Failed to initialize VaultService"))
+            .unwrap_or_else(|| anyhow::bail!("failed to initialize vault service"))
     }
 }
 
@@ -152,7 +148,7 @@ impl VaultService for VaultRegistry {
         let existing_vault = self
             .vaults
             .get_mut(environment)
-            .ok_or_else(|| anyhow::anyhow!("Environment not found!"))?;
+            .ok_or_else(|| anyhow::anyhow!("environment not found!"))?;
 
         for (key, value) in values {
             existing_vault.insert(key.to_string(), value.to_string());
@@ -163,12 +159,10 @@ impl VaultService for VaultRegistry {
 
     fn commit(&self) -> anyhow::Result<()> {
         if !self.vault_path.exists() {
-            anyhow::bail!("Vault file does not exist, please run `ramenv init` first");
+            anyhow::bail!("vault file does not exist, please run `ramenv init` first");
         }
 
         let new_vault_file_content = models::VaultFile {
-            name: self.name.clone(),
-            version: self.version.clone(),
             validation: self.validation.clone(),
             environments: self.vaults.clone(),
         };
@@ -186,5 +180,69 @@ impl VaultService for VaultRegistry {
 
     fn set_validation_rules(&mut self, rules: IndexMap<String, ValidationRule>) {
         self.validation = rules;
+    }
+}
+
+pub trait WorkspaceService {
+    fn get_workspace_root(&self) -> PathBuf;
+}
+
+pub struct WorkspaceRegistry {
+    workspace_root: PathBuf,
+    #[allow(dead_code)]
+    workspace_name: String,
+    #[allow(dead_code)]
+    schema_version: String,
+}
+
+impl WorkspaceRegistry {
+    pub fn new(current_working_path: &Path) -> Result<Self> {
+        let workspace_root = Self::find_workspace_root(current_working_path)?;
+        let workspace = Self::load_workspace(&workspace_root)?;
+
+        Ok(Self {
+            workspace_root,
+            workspace_name: workspace.workspace_name,
+            schema_version: workspace.schema_version,
+        })
+    }
+
+    fn find_workspace_root(start: &Path) -> Result<PathBuf> {
+        let mut current = start.to_path_buf();
+
+        loop {
+            let has_workspace = current.join(".ramenv.workspace.toml").exists();
+            let has_keys = current.join(".ramenv.keys").exists();
+
+            if has_workspace || has_keys {
+                return Ok(current);
+            }
+
+            if current.join(".git").exists() {
+                anyhow::bail!(
+                    "found .git but no .ramenv.workspace.toml or .ramenv.keys. Run `ramenv init`."
+                );
+            }
+
+            if !current.pop() {
+                anyhow::bail!("no ramenv workspace found. Run `ramenv init`.");
+            }
+        }
+    }
+
+    fn load_workspace(root: &Path) -> Result<models::WorkspaceFile> {
+        let workspace_file_path = root.join(".ramenv.workspace.toml");
+        if !workspace_file_path.exists() {
+            anyhow::bail!("workspace file does not exist, please run `ramenv init` first");
+        }
+
+        let content = std::fs::read_to_string(&workspace_file_path)?;
+        toml::from_str(&content).context("failed to parse workspace file")
+    }
+}
+
+impl WorkspaceService for WorkspaceRegistry {
+    fn get_workspace_root(&self) -> PathBuf {
+        self.workspace_root.to_path_buf()
     }
 }

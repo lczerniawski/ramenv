@@ -90,8 +90,6 @@ fn write_vault_file(workspace: &Path, environments: &[(&str, Vec<(&str, String)>
         .collect::<IndexMap<_, _>>();
 
     let vault = VaultFile {
-        name: "ramenv".to_string(),
-        version: "1.0.0".to_string(),
         validation: IndexMap::new(), // Diff command doesn't evaluate schema rules
         environments,
     };
