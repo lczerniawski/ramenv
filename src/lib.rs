@@ -138,7 +138,7 @@ pub fn run_cli() {
         Cli::Onboard(args) => {
             let (encryption_key_service, mut vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize services: {}", err);
+                    error!("failed to initialize ramenv: {}", err);
                     exit(1);
                 });
 
@@ -152,7 +152,7 @@ pub fn run_cli() {
         Cli::CreateEnv(args) => {
             let (mut encryption_key_service, mut vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize services: {}", err);
+                    error!("failed to initialize ramenv: {}", err);
                     exit(1);
                 });
 
@@ -161,7 +161,7 @@ pub fn run_cli() {
         Cli::Set(args) => {
             let (encryption_key_service, mut vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize services: {}", err);
+                    error!("failed to initialize ramenv: {}", err);
                     exit(1);
                 });
 
@@ -175,7 +175,7 @@ pub fn run_cli() {
         Cli::List(args) => {
             let (encryption_key_service, vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize services: {}", err);
+                    error!("failed to initialize ramenv: {}", err);
                     exit(1);
                 });
 
@@ -189,7 +189,7 @@ pub fn run_cli() {
         Cli::Validate(args) => {
             let (encryption_key_service, vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize services: {}", err);
+                    error!("failed to initialize ramenv: {}", err);
                     exit(1);
                 });
 
@@ -198,7 +198,7 @@ pub fn run_cli() {
         Cli::Diff(args) => {
             let (encryption_key_service, vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize services: {}", err);
+                    error!("failed to initialize ramenv: {}", err);
                     exit(1);
                 });
 
@@ -213,7 +213,7 @@ pub fn run_cli() {
         Cli::Run(args) => {
             let (encryption_key_service, vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize services: {}", err);
+                    error!("failed to initialize ramenv: {}", err);
                     exit(1);
                 });
 
@@ -227,7 +227,7 @@ pub fn run_cli() {
         Cli::Rotate(args) => {
             let (mut encryption_key_service, mut vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize services: {}", err);
+                    error!("failed to initialize ramenv: {}", err);
                     exit(1);
                 });
 
@@ -247,13 +247,10 @@ fn initialize_services(
     impl services::EncryptionKeyService,
     impl services::VaultService,
 )> {
-    let workspace_registry = services::WorkspaceRegistry::new(current_working_path)
-        .context("failed to initialize workspace registry")?;
+    let workspace_registry = services::WorkspaceRegistry::new(current_working_path)?;
     let encryption_key_service =
-        services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())
-            .context("failed to initilize encryption key service")?;
-    let vault_registry = services::VaultRegistry::new(current_working_path)
-        .context("failed to initialize vault registry")?;
+        services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())?;
+    let vault_registry = services::VaultRegistry::new(current_working_path)?;
 
     Ok((encryption_key_service, vault_registry))
 }
