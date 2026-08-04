@@ -5,7 +5,8 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
-use crate::{InitTarget, crypto, models};
+use crate::services::{EncryptionKeyService, WorkspaceService};
+use crate::{InitTarget, crypto, models, services};
 
 pub fn init_command(current_working_path: &Path, init_target: Option<InitTarget>) -> Result<()> {
     match init_target {
@@ -121,6 +122,7 @@ fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
         .insert("development".to_string(), crypto::generate_master_key_hex());
     keys.keys
         .insert("production".to_string(), crypto::generate_master_key_hex());
+
     let serialized_keys =
         toml::to_string(&keys).context("failed to serialize .ramenv.keys file")?;
     std::fs::write(&keys_path, &serialized_keys).context("failed to write .ramenv.keys to disc")?;
@@ -141,6 +143,34 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
     vault
         .environments
         .insert("production".to_string(), IndexMap::new());
+
+    let workspace_registry = services::WorkspaceRegistry::new(current_working_path)?;
+    let workspace_root = workspace_registry.get_workspace_root();
+    let vault_name = current_working_path
+        .strip_prefix(workspace_root)?
+        .to_str()
+        .map(|s| if s.is_empty() { "/" } else { s })
+        .unwrap_or("/");
+
+    let mut encryption_key_service =
+        services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())?;
+    encryption_key_service.store_new_vault_signature_key(vault_name);
+    encryption_key_service.commit()?;
+
+    let vault_signing_key = encryption_key_service.vault_signature_key(&vault_name)?;
+    let canonical_vault = models::CanonicalVault {
+        validation: vault.validation.clone(),
+        environments: vault.environments.clone(),
+    };
+    let canonical_vault_str = serde_json::to_string(&canonical_vault)
+        .context("failed to serialize vault for verification")?;
+    let signature = crypto::generate_signature(&canonical_vault_str, vault_signing_key)?;
+    let metadata = models::VaultMetadata {
+        signature,
+        signature_version: "1".to_string(),
+        signed_at: chrono::Utc::now().to_rfc3339(),
+    };
+    vault.metadata = metadata;
 
     let serialized_vault = toml::to_string(&vault)?;
     std::fs::write(&vault_path, &serialized_vault)?;

@@ -7,13 +7,16 @@ use crate::{crypto, models, validation::ValidationRule};
 
 pub trait EncryptionKeyService {
     fn env_key(&self, environment: &str) -> Result<&str>;
-    fn generate_new_env_key(&mut self, environment: &str);
+    fn store_new_env_key(&mut self, environment: &str);
+    fn vault_signature_key(&self, vault: &str) -> Result<&str>;
+    fn store_new_vault_signature_key(&mut self, vault: &str);
     fn commit(&self) -> anyhow::Result<()>;
 }
 
 pub struct LocalEncryptionKeyService {
     keys_path: PathBuf,
     keys: IndexMap<String, String>,
+    signatures: IndexMap<String, String>,
 }
 
 impl LocalEncryptionKeyService {
@@ -35,6 +38,7 @@ impl LocalEncryptionKeyService {
                 Ok(Self {
                     keys_path: keys_file_path,
                     keys: key_file.keys,
+                    signatures: key_file.signatures,
                 })
             })
             .unwrap_or_else(|| anyhow::bail!("failed to initialize encryption key service"))
@@ -54,9 +58,26 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
             })
     }
 
-    fn generate_new_env_key(&mut self, environment: &str) {
+    fn store_new_env_key(&mut self, environment: &str) {
         self.keys
             .insert(environment.to_string(), crypto::generate_master_key_hex());
+    }
+
+    fn vault_signature_key(&self, vault: &str) -> Result<&str> {
+        self.signatures
+            .get(vault)
+            .map(|s| s.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "signature key for {} vault does not exist, please run `ramenv init` first",
+                    vault
+                )
+            })
+    }
+
+    fn store_new_vault_signature_key(&mut self, vault: &str) {
+        self.signatures
+            .insert(vault.to_string(), crypto::generate_signature_key_hex());
     }
 
     fn commit(&self) -> anyhow::Result<()> {
@@ -66,6 +87,7 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
 
         let new_keys_file_content = models::KeysFile {
             keys: self.keys.clone(),
+            signatures: self.signatures.clone(),
         };
         let new_keys_file_content =
             toml::to_string(&new_keys_file_content).context("failed to serialize keys to TOML")?;
@@ -92,12 +114,13 @@ pub trait VaultService {
 
 pub struct VaultRegistry {
     vault_path: PathBuf,
+    vault_signing_key: String,
     validation: IndexMap<String, ValidationRule>,
-    vaults: IndexMap<String, IndexMap<String, String>>,
+    environments: IndexMap<String, IndexMap<String, String>>,
 }
 
 impl VaultRegistry {
-    pub fn new(current_working_path: &Path) -> Result<Self> {
+    pub fn new(current_working_path: &Path, vault_signing_key: &str) -> Result<Self> {
         let vault_file_path = Path::new(current_working_path).join(".ramenv.vault.toml");
         if !vault_file_path.exists() {
             anyhow::bail!("vault file does not exist, please run `ramenv init` first");
@@ -112,10 +135,24 @@ impl VaultRegistry {
                     .ok()
             })
             .map(|vault_file| {
+                let canonical_vault = models::CanonicalVault {
+                    validation: vault_file.validation.clone(),
+                    environments: vault_file.environments.clone(),
+                };
+                let canonical_value_str = serde_json::to_string(&canonical_vault)
+                    .context("failed to serialize vault for verification")?;
+                crypto::verify_signature(
+                    &canonical_value_str,
+                    &vault_file.metadata.signature,
+                    vault_signing_key,
+                )
+                .context("failed to verify vault signature")?;
+
                 Ok(Self {
                     vault_path: vault_file_path,
+                    vault_signing_key: vault_signing_key.to_string(),
                     validation: vault_file.validation,
-                    vaults: vault_file.environments,
+                    environments: vault_file.environments,
                 })
             })
             .unwrap_or_else(|| anyhow::bail!("failed to initialize vault service"))
@@ -124,7 +161,7 @@ impl VaultRegistry {
 
 impl VaultService for VaultRegistry {
     fn env_vault(&self, environment: &str) -> Result<IndexMap<String, String>> {
-        self.vaults.get(environment).cloned().ok_or_else(|| {
+        self.environments.get(environment).cloned().ok_or_else(|| {
             anyhow::anyhow!(
                 "vault for {} environment does not exist, please run `ramenv create-env` first",
                 environment
@@ -133,11 +170,11 @@ impl VaultService for VaultRegistry {
     }
 
     fn all_env_vaults(&self) -> IndexMap<String, IndexMap<String, String>> {
-        self.vaults.clone()
+        self.environments.clone()
     }
 
     fn set_env_vault(&mut self, environment: &str, values: IndexMap<String, String>) {
-        self.vaults.insert(environment.to_string(), values);
+        self.environments.insert(environment.to_string(), values);
     }
 
     fn merge_env_vault(
@@ -146,7 +183,7 @@ impl VaultService for VaultRegistry {
         values: IndexMap<String, String>,
     ) -> Result<()> {
         let existing_vault = self
-            .vaults
+            .environments
             .get_mut(environment)
             .ok_or_else(|| anyhow::anyhow!("environment not found!"))?;
 
@@ -162,9 +199,23 @@ impl VaultService for VaultRegistry {
             anyhow::bail!("vault file does not exist, please run `ramenv init` first");
         }
 
+        let canonical_vault = models::CanonicalVault {
+            validation: self.validation.clone(),
+            environments: self.environments.clone(),
+        };
+        let canonical_vault_str = serde_json::to_string(&canonical_vault)
+            .context("failed to serialize vault for verification")?;
+        let signature = crypto::generate_signature(&canonical_vault_str, &self.vault_signing_key)?;
+        let metadata = models::VaultMetadata {
+            signature,
+            signature_version: "1".to_string(),
+            signed_at: chrono::Utc::now().to_rfc3339(),
+        };
+
         let new_vault_file_content = models::VaultFile {
             validation: self.validation.clone(),
-            environments: self.vaults.clone(),
+            environments: self.environments.clone(),
+            metadata,
         };
         let serialized_vault = toml::to_string(&new_vault_file_content)
             .context("failed to serialize vault file to TOML")?;

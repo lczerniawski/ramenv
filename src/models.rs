@@ -6,18 +6,34 @@ use crate::validation::ValidationRule;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeysFile {
     pub keys: IndexMap<String, String>,
+    pub signatures: IndexMap<String, String>,
 }
 
 impl Default for KeysFile {
     fn default() -> Self {
         Self {
             keys: IndexMap::new(),
+            signatures: IndexMap::new(),
         }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VaultFile {
+    pub validation: IndexMap<String, ValidationRule>,
+    pub environments: IndexMap<String, IndexMap<String, String>>,
+    pub metadata: VaultMetadata,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultMetadata {
+    pub signature: String,
+    pub signature_version: String,
+    pub signed_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CanonicalVault {
     pub validation: IndexMap<String, ValidationRule>,
     pub environments: IndexMap<String, IndexMap<String, String>>,
 }
@@ -27,6 +43,17 @@ impl Default for VaultFile {
         Self {
             validation: IndexMap::new(),
             environments: IndexMap::new(),
+            metadata: VaultMetadata::default(),
+        }
+    }
+}
+
+impl Default for VaultMetadata {
+    fn default() -> Self {
+        Self {
+            signature: "".to_string(),
+            signature_version: "".to_string(),
+            signed_at: "".to_string(),
         }
     }
 }

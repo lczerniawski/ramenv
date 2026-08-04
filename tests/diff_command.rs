@@ -7,10 +7,11 @@ use std::{
 use indexmap::IndexMap;
 use ramenv::{
     crypto,
-    models::{KeysFile, VaultFile},
+    models::{CanonicalVault, KeysFile, VaultFile, VaultMetadata, WorkspaceFile},
 };
 
 const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const SIGNATURE_KEY_HEX: &str = "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf";
 
 struct Workspace {
     path: PathBuf,
@@ -62,12 +63,25 @@ fn run_diff(workspace: &Path, env1: &str, env2: &str, reveal: bool) -> Output {
     command.output().expect("run ramenv diff")
 }
 
+fn write_workspace_file(workspace: &Path) {
+    let workspace_file = WorkspaceFile::new("1".to_string(), "test-workspace".to_string());
+    std::fs::write(
+        workspace.join(".ramenv.workspace.toml"),
+        toml::to_string(&workspace_file).expect("serialize workspace"),
+    )
+    .expect("write workspace file");
+}
+
 fn write_keys_file(workspace: &Path, keys: &[(&str, &str)]) {
+    let mut signatures = IndexMap::new();
+    signatures.insert("/".to_string(), SIGNATURE_KEY_HEX.to_string());
+
     let keys = KeysFile {
         keys: keys
             .iter()
             .map(|(environment, key)| ((*environment).to_string(), (*key).to_string()))
             .collect(),
+        signatures,
     };
 
     std::fs::write(
@@ -89,9 +103,26 @@ fn write_vault_file(workspace: &Path, environments: &[(&str, Vec<(&str, String)>
         })
         .collect::<IndexMap<_, _>>();
 
+    // Create canonical vault for signing
+    let canonical_vault = CanonicalVault {
+        validation: IndexMap::new(),
+        environments: environments.clone(),
+    };
+    let canonical_vault_str =
+        serde_json::to_string(&canonical_vault).expect("serialize canonical vault");
+    let signature = crypto::generate_signature(&canonical_vault_str, SIGNATURE_KEY_HEX)
+        .expect("generate signature");
+
+    let metadata = VaultMetadata {
+        signature,
+        signature_version: "1".to_string(),
+        signed_at: chrono::Utc::now().to_rfc3339(),
+    };
+
     let vault = VaultFile {
         validation: IndexMap::new(), // Diff command doesn't evaluate schema rules
         environments,
+        metadata,
     };
 
     std::fs::write(
@@ -119,6 +150,7 @@ fn run_diff_case(
     expected_fragment: Option<&str>,
 ) {
     let workspace = Workspace::new();
+    write_workspace_file(workspace.path());
     write_keys_file(workspace.path(), &keys);
     write_vault_file(workspace.path(), &vaults);
 

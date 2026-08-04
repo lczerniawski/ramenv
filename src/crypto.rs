@@ -3,9 +3,16 @@ use aes_gcm::{
     aead::{Aead, Generate, Key, KeyInit},
 };
 use anyhow::{Context, Ok, Result};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 pub fn generate_master_key_hex() -> String {
     let key_bytes = Key::<Aes256Gcm>::generate();
+    encode_bytes(key_bytes.to_vec())
+}
+
+pub fn generate_signature_key_hex() -> String {
+    let key_bytes = Key::<Hmac<Sha256>>::generate();
     encode_bytes(key_bytes.to_vec())
 }
 
@@ -58,4 +65,27 @@ fn decode_hex(hex_str: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16))
         .collect()
+}
+
+pub fn generate_signature(value: &str, key_hex: &str) -> Result<String> {
+    let key_bytes = decode_hex(key_hex).context("failed to decode signature key")?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key_bytes).context("failed to create HMAC")?;
+
+    mac.update(value.as_bytes());
+    let signature_bytes = mac.finalize().into_bytes();
+
+    Ok(encode_bytes(signature_bytes.to_vec()))
+}
+
+pub fn verify_signature(value: &str, signature_hex: &str, key_hex: &str) -> Result<()> {
+    let key_bytes = decode_hex(key_hex).context("failed to decode signature key")?;
+    let expected_signature_bytes =
+        decode_hex(signature_hex).context("failed to decode signatrue")?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key_bytes).context("failed to create HMAC")?;
+
+    mac.update(value.as_bytes());
+    mac.verify_slice(&expected_signature_bytes)
+        .context("failed to verify signature")?;
+
+    Ok(())
 }

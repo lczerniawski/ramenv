@@ -7,11 +7,12 @@ use std::{
 use indexmap::IndexMap;
 use ramenv::{
     crypto,
-    models::{KeysFile, VaultFile},
+    models::{CanonicalVault, KeysFile, VaultFile, VaultMetadata, WorkspaceFile},
     validation::{RuleType, ValidationRule},
 };
 
 const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const SIGNATURE_KEY_HEX: &str = "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf";
 
 struct Workspace {
     path: PathBuf,
@@ -64,12 +65,25 @@ fn run_validate(workspace: &Path, environment: Option<&str>) -> Output {
     command.output().expect("run ramenv validate")
 }
 
+fn write_workspace_file(workspace: &Path) {
+    let workspace_file = WorkspaceFile::new("1".to_string(), "test-workspace".to_string());
+    std::fs::write(
+        workspace.join(".ramenv.workspace.toml"),
+        toml::to_string(&workspace_file).expect("serialize workspace"),
+    )
+    .expect("write workspace file");
+}
+
 fn write_keys_file(workspace: &Path, keys: &[(&str, &str)]) {
+    let mut signatures = IndexMap::new();
+    signatures.insert("/".to_string(), SIGNATURE_KEY_HEX.to_string());
+
     let keys = KeysFile {
         keys: keys
             .iter()
             .map(|(environment, key)| ((*environment).to_string(), (*key).to_string()))
             .collect(),
+        signatures,
     };
 
     std::fs::write(
@@ -100,9 +114,26 @@ fn write_vault_file(
         })
         .collect::<IndexMap<_, _>>();
 
+    // Create canonical vault for signing
+    let canonical_vault = CanonicalVault {
+        validation: validation.clone(),
+        environments: environments.clone(),
+    };
+    let canonical_vault_str =
+        serde_json::to_string(&canonical_vault).expect("serialize canonical vault");
+    let signature = crypto::generate_signature(&canonical_vault_str, SIGNATURE_KEY_HEX)
+        .expect("generate signature");
+
+    let metadata = VaultMetadata {
+        signature,
+        signature_version: "1".to_string(),
+        signed_at: chrono::Utc::now().to_rfc3339(),
+    };
+
     let vault = VaultFile {
         validation,
         environments,
+        metadata,
     };
 
     std::fs::write(
@@ -138,6 +169,7 @@ fn run_validate_case(
     stderr_fragment: Option<&str>,
 ) {
     let workspace = Workspace::new();
+    write_workspace_file(workspace.path());
     write_keys_file(workspace.path(), &keys);
     write_vault_file(workspace.path(), &validations, &vaults);
 
@@ -837,10 +869,11 @@ fn validate_command_errors_when_all_envs_missing_a_key() {
 #[test]
 fn validate_command_reports_missing_cli_files() {
     let workspace = Workspace::new();
+    write_workspace_file(workspace.path());
     let output = run_validate(workspace.path(), Some("development"));
     assert_failure(&output);
     assert!(
-        stderr(&output).contains("Keys file does not exist"),
+        stderr(&output).contains("keys file does not exist"),
         "missing keys file stderr: {}",
         stderr(&output)
     );
@@ -849,7 +882,7 @@ fn validate_command_reports_missing_cli_files() {
     let output = run_validate(workspace.path(), Some("development"));
     assert_failure(&output);
     assert!(
-        stderr(&output).contains("Vault file does not exist"),
+        stderr(&output).contains("vault file does not exist"),
         "missing vault file stderr: {}",
         stderr(&output)
     );

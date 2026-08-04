@@ -15,7 +15,7 @@ pub fn rotate_command(
     let vault = vault_registry.env_vault(env)?;
 
     let mut new_vault = IndexMap::new();
-    encryption_key_service.generate_new_env_key(env);
+    encryption_key_service.store_new_env_key(env);
     let new_encryption_key = encryption_key_service.env_key(env)?;
 
     for (key, value) in vault.iter() {

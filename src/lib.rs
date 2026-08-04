@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::process::exit;
 
-use anyhow::Context;
 use anyhow::Ok;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -9,8 +8,11 @@ use env_logger::Env;
 use log::error;
 use services::WorkspaceService;
 
+use crate::services::EncryptionKeyService;
+
 // TODO Key Provider to be installed as a plugin from cargo the same way it is done for pi agent harness
 // TODO menu -> list of providers, ingredient -> type of provider
+// TODO add successful info messages to all commands
 
 mod commands;
 pub mod crypto;
@@ -81,6 +83,9 @@ struct SetArgs {
     env: String,
     /// Name of the environment variable to set
     key: String,
+    /// Set the value as plaintext (default: false)
+    #[arg(long, default_value_t = false)]
+    plaintext: bool,
 }
 
 #[derive(Args, Debug)]
@@ -168,6 +173,7 @@ pub fn run_cli() {
             commands::set_command(
                 &args.env,
                 &args.key,
+                args.plaintext,
                 &encryption_key_service,
                 &mut vault_service,
             )
@@ -250,7 +256,19 @@ fn initialize_services(
     let workspace_registry = services::WorkspaceRegistry::new(current_working_path)?;
     let encryption_key_service =
         services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())?;
-    let vault_registry = services::VaultRegistry::new(current_working_path)?;
 
-    Ok((encryption_key_service, vault_registry))
+    if let Some(vault_path) = workspace_registry
+        .get_workspace_root()
+        .strip_prefix(current_working_path)?
+        .to_str()
+        .map(|s| if s.is_empty() { "/" } else { s })
+    {
+        let vault_signature_key = encryption_key_service.vault_signature_key(vault_path)?;
+        let vault_registry =
+            services::VaultRegistry::new(current_working_path, vault_signature_key)?;
+
+        return Ok((encryption_key_service, vault_registry));
+    }
+
+    anyhow::bail!("failed to initialize vault registry");
 }

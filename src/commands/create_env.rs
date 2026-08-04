@@ -16,7 +16,7 @@ pub fn create_env_command(
         anyhow::bail!("vault for provided environment already exists");
     }
 
-    encryption_key_service.generate_new_env_key(environment);
+    encryption_key_service.store_new_env_key(environment);
     encryption_key_service
         .commit()
         .context("failed to synchronize keys back to file")?;
