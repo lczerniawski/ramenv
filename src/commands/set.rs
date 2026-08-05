@@ -63,6 +63,6 @@ pub fn set_command(
     vault_service.set_env_vault(environment, vault);
     vault_service.commit()?;
 
-    info!("successfully set secret value for key: {}", key);
+    info!("🔐 successfully set secret value for key: {}", key);
     Ok(())
 }

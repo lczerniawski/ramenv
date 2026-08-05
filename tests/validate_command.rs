@@ -212,7 +212,7 @@ fn validate_command_succeeds_for_selected_env() {
             ("production", vec![("API_KEY", secret)]),
         ],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -237,7 +237,7 @@ fn validate_command_succeeds_for_all_envs() {
             ("production", vec![("API_KEY", secret)]),
         ],
         true,
-        None,
+        Some("validation passed for all environments"),
     );
 }
 
@@ -259,7 +259,7 @@ fn validate_command_decrypts_encrypted_secret() {
         )],
         vec![("development", vec![("API_KEY", encrypted_secret)])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -280,7 +280,7 @@ fn validate_command_uses_plain_value_when_no_secret_prefix() {
         )],
         vec![("development", vec![("API_KEY", "plain-value".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -343,7 +343,7 @@ fn validate_command_accepts_string_at_min_length() {
         )],
         vec![("development", vec![("API_KEY", "abcd".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -385,7 +385,7 @@ fn validate_command_accepts_string_at_max_length() {
         )],
         vec![("development", vec![("API_KEY", "abcd".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -427,7 +427,7 @@ fn validate_command_accepts_integer_at_min_value() {
         )],
         vec![("development", vec![("PORT", "10".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -469,7 +469,7 @@ fn validate_command_accepts_integer_at_max_value() {
         )],
         vec![("development", vec![("PORT", "10".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -532,7 +532,7 @@ fn validate_command_accepts_float_at_min_value() {
         )],
         vec![("development", vec![("RATE", "1.5".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -574,7 +574,7 @@ fn validate_command_accepts_float_at_max_value() {
         )],
         vec![("development", vec![("RATE", "2.5".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -619,7 +619,7 @@ fn validate_command_accepts_boolean_value() {
         vec![("FLAG", ValidationRule::new(RuleType::Boolean, true))],
         vec![("development", vec![("FLAG", "true".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -655,7 +655,7 @@ fn validate_command_accepts_port_value() {
         vec![("PORT", ValidationRule::new(RuleType::Port, true))],
         vec![("development", vec![("PORT", "8080".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -682,7 +682,7 @@ fn validate_command_accepts_uri_value() {
             vec![("SITE_URL", "https://example.com".to_string())],
         )],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -706,7 +706,7 @@ fn validate_command_accepts_ip_value() {
         vec![("HOST", ValidationRule::new(RuleType::IP, true))],
         vec![("development", vec![("HOST", "127.0.0.1".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -736,7 +736,7 @@ fn validate_command_accepts_email_value() {
             vec![("EMAIL", "user@example.com".to_string())],
         )],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 
@@ -776,7 +776,7 @@ fn validate_command_accepts_regex_match() {
         )],
         vec![("development", vec![("CODE", "ABCD".to_string())])],
         true,
-        None,
+        Some("validation passed for environment: development"),
     );
 }
 

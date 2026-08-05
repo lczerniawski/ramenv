@@ -1,5 +1,6 @@
 use anyhow::Result;
 use indexmap::IndexMap;
+use log::info;
 
 use crate::{
     crypto, services,
@@ -32,5 +33,10 @@ pub fn rotate_command(
 
     vault_registry.commit()?;
     encryption_key_service.commit()?;
+
+    info!(
+        "🔄 successfully rotated encryption keys for environment: {}",
+        env
+    );
     Ok(())
 }

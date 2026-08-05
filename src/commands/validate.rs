@@ -1,6 +1,6 @@
 use anyhow::{Ok, Result};
 use indexmap::IndexMap;
-use log::error;
+use log::{error, info};
 
 use crate::{
     services,
@@ -18,13 +18,15 @@ pub fn validate_command(
         let encryption_key = encryption_key_service.env_key(&env)?;
         let vault = vault_service.env_vault(&env)?;
 
-        validate_vault(encryption_key, vault, &validation_rules, env)?;
+        validate_vault(encryption_key, vault, &validation_rules, env.clone())?;
+        info!("✅ validation passed for environment: {}", env);
     } else {
         for (env, vault) in vault_service.all_env_vaults() {
             let encryption_key = encryption_key_service.env_key(&env)?;
 
             validate_vault(encryption_key, vault, &validation_rules, env)?;
         }
+        info!("✅ validation passed for all environments");
     }
     Ok(())
 }
