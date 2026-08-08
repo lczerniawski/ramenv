@@ -1,18 +1,22 @@
 mod create_env;
+mod delete;
 mod diff;
 mod init;
 mod list;
 mod on_board;
+mod remove_env;
 mod rotate;
 mod run;
 mod set;
 mod validate;
 
 pub use create_env::create_env_command;
+pub use delete::delete_command;
 pub use diff::diff_command;
 pub use init::init_command;
 pub use list::list_command;
 pub use on_board::on_board_command;
+pub use remove_env::remove_env_command;
 pub use rotate::rotate_command;
 pub use run::run_command;
 pub use set::set_command;

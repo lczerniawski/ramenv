@@ -157,9 +157,8 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
     encryption_key_service.store_new_vault_signature_key(vault_name);
     encryption_key_service.commit()?;
 
-    let vault_signing_key = encryption_key_service.vault_signature_key(&vault_name)?;
+    let vault_signing_key = encryption_key_service.vault_signature_key(vault_name)?;
     let canonical_vault = models::CanonicalVault {
-        validation: vault.validation.clone(),
         environments: vault.environments.clone(),
     };
     let canonical_vault_str = serde_json::to_string(&canonical_vault)

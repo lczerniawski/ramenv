@@ -12,7 +12,6 @@ use crate::services::EncryptionKeyService;
 
 // TODO Key Provider to be installed as a plugin from cargo the same way it is done for pi agent harness
 // TODO menu -> list of providers, ingredient -> type of provider
-// TODO add successful info messages to all commands
 
 mod commands;
 pub mod crypto;
@@ -37,12 +36,16 @@ enum Cli {
         #[command(subcommand)]
         target: Option<InitTarget>,
     },
-    /// Move the existing secrets from the .env file into the encrypted vault file
+    /// Move the existing secrets from the .env file into the vault file
     Onboard(OnboardArgs),
     /// Create a new environment
     CreateEnv(CreateEnvArgs),
-    /// Securely add or update a secret directly inside the encrypted file
+    /// Remove an environment
+    RemoveEnv(RemoveEnvArgs),
+    /// Securely add or update a value directly inside the vault file
     Set(SetArgs),
+    /// Delete a value from the vault
+    Delete(DeleteArgs),
     /// Print the decrypted secrets to stdout (useful for debugging)
     List(ListArgs),
     /// Validate the encrypted variables against a schema to catch typos/missing keys
@@ -78,6 +81,12 @@ struct CreateEnvArgs {
 }
 
 #[derive(Args, Debug)]
+struct RemoveEnvArgs {
+    /// Name of the environment to remove
+    env: String,
+}
+
+#[derive(Args, Debug)]
 struct SetArgs {
     /// Environment to set the variable in
     env: String,
@@ -86,6 +95,14 @@ struct SetArgs {
     /// Set the value as plaintext (default: false)
     #[arg(long, default_value_t = false)]
     plaintext: bool,
+}
+
+#[derive(Args, Debug)]
+struct DeleteArgs {
+    /// Environment to delete the variable from
+    env: String,
+    /// Name of the environment variable to delete
+    key: String,
 }
 
 #[derive(Args, Debug)]
@@ -163,6 +180,15 @@ pub fn run_cli() {
 
             commands::create_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
         }
+        Cli::RemoveEnv(args) => {
+            let (mut encryption_key_service, mut vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize ramenv: {}", err);
+                    exit(1);
+                });
+
+            commands::remove_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
+        }
         Cli::Set(args) => {
             let (encryption_key_service, mut vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
@@ -177,6 +203,15 @@ pub fn run_cli() {
                 &encryption_key_service,
                 &mut vault_service,
             )
+        }
+        Cli::Delete(args) => {
+            let (_, mut vault_service) =
+                initialize_services(&current_working_path).unwrap_or_else(|err| {
+                    error!("failed to initialize ramenv: {}", err);
+                    exit(1);
+                });
+
+            commands::delete_command(&args.env, &args.key, &mut vault_service)
         }
         Cli::List(args) => {
             let (encryption_key_service, vault_service) =

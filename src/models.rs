@@ -34,7 +34,6 @@ pub struct VaultMetadata {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CanonicalVault {
-    pub validation: IndexMap<String, ValidationRule>,
     pub environments: IndexMap<String, IndexMap<String, String>>,
 }
 

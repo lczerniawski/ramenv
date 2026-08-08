@@ -8,6 +8,7 @@ use crate::{crypto, models, validation::ValidationRule};
 pub trait EncryptionKeyService {
     fn env_key(&self, environment: &str) -> Result<&str>;
     fn store_new_env_key(&mut self, environment: &str);
+    fn remove_env_key(&mut self, environment: &str);
     fn vault_signature_key(&self, vault: &str) -> Result<&str>;
     fn store_new_vault_signature_key(&mut self, vault: &str);
     fn commit(&self) -> anyhow::Result<()>;
@@ -63,6 +64,10 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
             .insert(environment.to_string(), crypto::generate_master_key_hex());
     }
 
+    fn remove_env_key(&mut self, environment: &str) {
+        self.keys.shift_remove(environment);
+    }
+
     fn vault_signature_key(&self, vault: &str) -> Result<&str> {
         self.signatures
             .get(vault)
@@ -102,6 +107,7 @@ pub trait VaultService {
     fn env_vault(&self, environment: &str) -> Result<IndexMap<String, String>>;
     fn all_env_vaults(&self) -> IndexMap<String, IndexMap<String, String>>;
     fn set_env_vault(&mut self, environment: &str, values: IndexMap<String, String>);
+    fn remove_env_vault(&mut self, environment: &str);
     fn merge_env_vault(
         &mut self,
         environment: &str,
@@ -136,7 +142,6 @@ impl VaultRegistry {
             })
             .map(|vault_file| {
                 let canonical_vault = models::CanonicalVault {
-                    validation: vault_file.validation.clone(),
                     environments: vault_file.environments.clone(),
                 };
                 let canonical_value_str = serde_json::to_string(&canonical_vault)
@@ -177,6 +182,10 @@ impl VaultService for VaultRegistry {
         self.environments.insert(environment.to_string(), values);
     }
 
+    fn remove_env_vault(&mut self, environment: &str) {
+        self.environments.shift_remove(environment);
+    }
+
     fn merge_env_vault(
         &mut self,
         environment: &str,
@@ -200,7 +209,6 @@ impl VaultService for VaultRegistry {
         }
 
         let canonical_vault = models::CanonicalVault {
-            validation: self.validation.clone(),
             environments: self.environments.clone(),
         };
         let canonical_vault_str = serde_json::to_string(&canonical_vault)
