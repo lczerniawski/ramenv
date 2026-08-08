@@ -105,7 +105,6 @@ fn write_vault_file(workspace: &Path, environments: &[(&str, Vec<(&str, String)>
 
     // Create canonical vault for signing
     let canonical_vault = CanonicalVault {
-        validation: IndexMap::new(),
         environments: environments.clone(),
     };
     let canonical_vault_str =

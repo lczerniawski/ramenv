@@ -116,7 +116,6 @@ fn write_vault_file(
 
     // Create canonical vault for signing
     let canonical_vault = CanonicalVault {
-        validation: validation.clone(),
         environments: environments.clone(),
     };
     let canonical_vault_str =
