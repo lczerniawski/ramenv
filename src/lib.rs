@@ -292,9 +292,8 @@ fn initialize_services(
     let encryption_key_service =
         services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())?;
 
-    if let Some(vault_path) = workspace_registry
-        .get_workspace_root()
-        .strip_prefix(current_working_path)?
+    if let Some(vault_path) = current_working_path
+        .strip_prefix(workspace_registry.get_workspace_root())?
         .to_str()
         .map(|s| if s.is_empty() { "/" } else { s })
     {
