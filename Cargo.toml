@@ -2,6 +2,8 @@
 name = "ramenv"
 version = "0.1.0"
 edition = "2024"
+description = "Encrypted environment variable manager with optional validation and monorepo support"
+license = "MIT"
 default-run = "ramenv"
 
 [[bin]]
