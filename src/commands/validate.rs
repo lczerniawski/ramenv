@@ -62,3 +62,83 @@ fn validate_vault(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use indexmap::IndexMap;
+
+    use super::*;
+    use crate::{
+        commands::test_support::{KEY, Keys, Vault},
+        crypto,
+        validation::{RuleType, ValidationRule},
+    };
+
+    #[test]
+    fn validates_selected_and_all_environments() {
+        let keys = Keys {
+            values: IndexMap::from([("one".into(), KEY.into()), ("two".into(), KEY.into())]),
+            ..Keys::default()
+        };
+        let mut vault = Vault {
+            environments: IndexMap::from([
+                ("one".into(), IndexMap::from([("PORT".into(), "80".into())])),
+                (
+                    "two".into(),
+                    IndexMap::from([("PORT".into(), "443".into())]),
+                ),
+            ]),
+            ..Vault::default()
+        };
+        vault
+            .rules
+            .insert("PORT".into(), ValidationRule::new(RuleType::Port, true));
+        assert!(validate_command(Some("one".into()), &keys, &vault).is_ok());
+        assert!(validate_command(None, &keys, &vault).is_ok());
+    }
+
+    #[test]
+    fn optional_missing_values_pass_but_required_invalid_and_corrupt_values_fail() {
+        let optional = IndexMap::from([(
+            "OPTIONAL".into(),
+            ValidationRule::new(RuleType::Boolean, false),
+        )]);
+        assert!(validate_vault(KEY, IndexMap::new(), &optional, "dev".into()).is_ok());
+
+        let required = IndexMap::from([("PORT".into(), ValidationRule::new(RuleType::Port, true))]);
+        assert!(validate_vault(KEY, IndexMap::new(), &required, "dev".into()).is_err());
+        assert!(
+            validate_vault(
+                KEY,
+                IndexMap::from([("PORT".into(), "invalid".into())]),
+                &required,
+                "dev".into()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_vault(
+                KEY,
+                IndexMap::from([("PORT".into(), "secret:bad".into())]),
+                &required,
+                "dev".into()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn decrypts_valid_encrypted_values() {
+        let rules = IndexMap::from([("PORT".into(), ValidationRule::new(RuleType::Port, true))]);
+        let value = crypto::encrypt_value("8080", KEY).unwrap();
+        assert!(
+            validate_vault(
+                KEY,
+                IndexMap::from([("PORT".into(), value)]),
+                &rules,
+                "dev".into()
+            )
+            .is_ok()
+        );
+    }
+}

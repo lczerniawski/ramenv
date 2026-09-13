@@ -495,4 +495,11 @@ mod tests {
             "[test-env] Key 'SERIAL' has an invalid regex pattern: '[unclosed-bracket'"
         );
     }
+
+    #[test]
+    fn validation_rule_constructor_preserves_type_and_required_flag() {
+        let rule = ValidationRule::new(RuleType::Boolean, false);
+        assert!(!rule.required);
+        assert!(matches!(rule.rule_type, RuleType::Boolean));
+    }
 }

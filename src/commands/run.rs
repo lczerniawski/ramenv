@@ -44,3 +44,57 @@ pub fn run_command(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use indexmap::IndexMap;
+
+    use super::*;
+    use crate::commands::test_support::{Keys, Vault};
+
+    #[test]
+    fn rejects_empty_command_before_service_lookups() {
+        assert!(run_command("dev", &[], &Keys::default(), &Vault::default()).is_err());
+    }
+
+    #[test]
+    fn reports_missing_environment_state_and_bad_values() {
+        let command = vec!["does-not-matter".to_string()];
+        assert!(run_command("dev", &command, &Keys::with_env("dev"), &Vault::default()).is_err());
+        assert!(
+            run_command(
+                "dev",
+                &command,
+                &Keys::default(),
+                &Vault::with_env("dev", IndexMap::new())
+            )
+            .is_err()
+        );
+        assert!(
+            run_command(
+                "dev",
+                &command,
+                &Keys::with_env("dev"),
+                &Vault::with_env("dev", IndexMap::from([("KEY".into(), "secret:bad".into())]))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reports_failure_to_spawn_program() {
+        let command = vec!["ramenv-binary-that-does-not-exist".to_string()];
+        let result = run_command(
+            "dev",
+            &command,
+            &Keys::with_env("dev"),
+            &Vault::with_env("dev", IndexMap::new()),
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to start command")
+        );
+    }
+}

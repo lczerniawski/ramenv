@@ -71,3 +71,50 @@ impl WorkspaceFile {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_empty_and_serializable() {
+        let keys = KeysFile::default();
+        assert!(keys.keys.is_empty());
+        assert!(keys.signatures.is_empty());
+
+        let vault = VaultFile::default();
+        assert!(vault.validation.is_empty());
+        assert!(vault.environments.is_empty());
+        assert_eq!(vault.metadata.signature, "");
+        assert_eq!(vault.metadata.signature_version, "");
+        assert_eq!(vault.metadata.signed_at, "");
+        toml::to_string(&keys).unwrap();
+        toml::to_string(&vault).unwrap();
+    }
+
+    #[test]
+    fn workspace_constructor_preserves_arguments() {
+        let workspace = WorkspaceFile::new("2".into(), "payments".into());
+        assert_eq!(workspace.schema_version, "2");
+        assert_eq!(workspace.workspace_name, "payments");
+    }
+
+    #[test]
+    fn validation_required_defaults_to_true_when_deserializing() {
+        let vault: VaultFile = toml::from_str(
+            r#"
+environments = {}
+
+[validation.API_KEY]
+type = "string"
+
+[metadata]
+signature = "sig"
+signature_version = "1"
+signed_at = "now"
+"#,
+        )
+        .unwrap();
+        assert!(vault.validation["API_KEY"].required);
+    }
+}

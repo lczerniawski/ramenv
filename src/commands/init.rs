@@ -194,3 +194,131 @@ fn init_workspace_file(current_working_path: &Path) -> Result<InitStatus> {
 
     Ok(InitStatus::Created)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    impl TempDir {
+        fn new() -> Self {
+            let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("ramenv-init-unit-{}-{unique}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn gitignore_creates_updates_and_then_skips_entries() {
+        let root = TempDir::new();
+        assert!(matches!(
+            init_gitignore(&root.0).unwrap(),
+            InitStatus::Updated
+        ));
+        let content = std::fs::read_to_string(root.0.join(".gitignore")).unwrap();
+        assert!(content.contains(".env"));
+        assert!(content.contains(".ramenv.keys"));
+        assert!(matches!(
+            init_gitignore(&root.0).unwrap(),
+            InitStatus::Skipped
+        ));
+
+        std::fs::write(root.0.join(".gitignore"), ".env\n").unwrap();
+        assert!(matches!(
+            init_gitignore(&root.0).unwrap(),
+            InitStatus::Updated
+        ));
+        let content = std::fs::read_to_string(root.0.join(".gitignore")).unwrap();
+        assert_eq!(content.lines().filter(|line| *line == ".env").count(), 1);
+        assert_eq!(
+            content
+                .lines()
+                .filter(|line| *line == ".ramenv.keys")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn key_and_workspace_initializers_create_then_skip_valid_files() {
+        let root = TempDir::new();
+        assert!(matches!(
+            init_keys_file(&root.0).unwrap(),
+            InitStatus::Created
+        ));
+        let keys: models::KeysFile =
+            toml::from_str(&std::fs::read_to_string(root.0.join(".ramenv.keys")).unwrap()).unwrap();
+        assert_eq!(keys.keys.len(), 2);
+        assert!(matches!(
+            init_keys_file(&root.0).unwrap(),
+            InitStatus::Skipped
+        ));
+
+        assert!(matches!(
+            init_workspace_file(&root.0).unwrap(),
+            InitStatus::Created
+        ));
+        let workspace: models::WorkspaceFile = toml::from_str(
+            &std::fs::read_to_string(root.0.join(".ramenv.workspace.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(workspace.schema_version, "1");
+        assert_eq!(
+            workspace.workspace_name,
+            root.0.file_name().unwrap().to_string_lossy()
+        );
+        assert!(matches!(
+            init_workspace_file(&root.0).unwrap(),
+            InitStatus::Skipped
+        ));
+    }
+
+    #[test]
+    fn full_init_creates_signed_vault_and_is_idempotent() {
+        let root = TempDir::new();
+        init_command(&root.0, None).unwrap();
+        let keys: models::KeysFile =
+            toml::from_str(&std::fs::read_to_string(root.0.join(".ramenv.keys")).unwrap()).unwrap();
+        let vault: models::VaultFile =
+            toml::from_str(&std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap())
+                .unwrap();
+        assert_eq!(vault.environments.len(), 2);
+        let canonical = serde_json::to_string(&models::CanonicalVault {
+            environments: vault.environments.clone(),
+        })
+        .unwrap();
+        crypto::verify_signature(&canonical, &vault.metadata.signature, &keys.signatures["/"])
+            .unwrap();
+
+        let before = std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap();
+        init_command(&root.0, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn service_init_fails_without_workspace_and_workspace_target_omits_vault() {
+        let root = TempDir::new();
+        assert!(init_command(&root.0, Some(InitTarget::Service)).is_err());
+        init_command(&root.0, Some(InitTarget::Workspace)).unwrap();
+        assert!(!root.0.join(".ramenv.vault.toml").exists());
+    }
+}

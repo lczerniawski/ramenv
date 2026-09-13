@@ -20,6 +20,7 @@ pub fn on_board_command(
 
     if !env_file_path.exists() {
         info!(".env file does not exist, nothing to onboard");
+        return Ok(());
     }
     let encryption_key = encryption_key_service
         .env_key(environment)
@@ -42,6 +43,22 @@ pub fn on_board_command(
     .prompt()
     .context("failed to prompt user for key selection")?;
 
+    merge_env_data(
+        environment,
+        env_file_data,
+        &keys_selected_for_encryption,
+        encryption_key,
+        vault_service,
+    )
+}
+
+fn merge_env_data(
+    environment: &str,
+    env_file_data: HashMap<String, String>,
+    keys_selected_for_encryption: &[String],
+    encryption_key: &str,
+    vault_service: &mut impl services::VaultService,
+) -> anyhow::Result<()> {
     let mut validation_rules = vault_service.validation_rules();
 
     let vault_data: IndexMap<String, String> = env_file_data
@@ -74,4 +91,67 @@ pub fn on_board_command(
 
     info!("🍜 vault onboarded successfully!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        commands::test_support::{KEY, Vault},
+        services::VaultService,
+        validation::RuleType,
+    };
+
+    #[test]
+    fn merges_plain_and_encrypted_values_and_creates_rules() {
+        let mut vault =
+            Vault::with_env("dev", IndexMap::from([("EXISTING".into(), "kept".into())]));
+        merge_env_data(
+            "dev",
+            HashMap::from([
+                ("SECRET".into(), "sensitive".into()),
+                ("PLAIN".into(), "visible".into()),
+            ]),
+            &["SECRET".into()],
+            KEY,
+            &mut vault,
+        )
+        .unwrap();
+        let values = vault.env_vault("dev").unwrap();
+        assert_eq!(values["EXISTING"], "kept");
+        assert_eq!(values["PLAIN"], "visible");
+        assert_eq!(
+            crypto::decrypt_value(&values["SECRET"], KEY).unwrap(),
+            "sensitive"
+        );
+        assert_eq!(vault.rules.len(), 2);
+        assert!(vault.rules.values().all(|rule| rule.required));
+        assert!(
+            vault
+                .rules
+                .values()
+                .all(|rule| matches!(rule.rule_type, RuleType::String { .. }))
+        );
+        assert_eq!(vault.commits.get(), 1);
+    }
+
+    #[test]
+    fn reports_missing_environment_bad_key_and_commit_failure() {
+        assert!(merge_env_data("dev", HashMap::new(), &[], KEY, &mut Vault::default()).is_err());
+        assert!(
+            merge_env_data(
+                "dev",
+                HashMap::from([("SECRET".into(), "value".into())]),
+                &["SECRET".into()],
+                "bad-key",
+                &mut Vault::with_env("dev", IndexMap::new())
+            )
+            .is_err()
+        );
+        let mut vault = Vault {
+            fail_commit: true,
+            ..Vault::with_env("dev", IndexMap::new())
+        };
+        assert!(merge_env_data("dev", HashMap::new(), &[], KEY, &mut vault).is_err());
+    }
 }

@@ -205,3 +205,18 @@ fn run_command_fails_gracefully_when_binary_args_are_empty() {
         stderr(&output)
     );
 }
+
+#[test]
+fn run_command_propagates_the_child_exit_code() {
+    let workspace = Workspace::new();
+    write_workspace_file(workspace.path());
+    write_keys_file(workspace.path(), &[("development", KEY_HEX)]);
+    write_vault_file(workspace.path(), &[("development", vec![])]);
+    let printer = env_printer_bin_path();
+    let output = run_execute(
+        workspace.path(),
+        "development",
+        &[printer.to_str().unwrap(), "--exit-code", "7"],
+    );
+    assert_eq!(output.status.code(), Some(7));
+}

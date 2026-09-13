@@ -306,3 +306,61 @@ fn initialize_services(
 
     anyhow::bail!("failed to initialize vault registry");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::*;
+    use crate::services::{EncryptionKeyService, VaultService};
+
+    struct TempDir(PathBuf);
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    impl TempDir {
+        fn new() -> Self {
+            let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("ramenv-lib-unit-{}-{unique}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn initializes_services_for_single_repository() {
+        let root = TempDir::new();
+        commands::init_command(&root.0, None).unwrap();
+        let (keys, vault) = initialize_services(&root.0).unwrap();
+        assert_eq!(keys.env_key("development").unwrap().len(), 64);
+        assert!(vault.env_vault("development").is_ok());
+    }
+
+    #[test]
+    fn initializes_services_for_nested_monorepo_vault() {
+        let root = TempDir::new();
+        commands::init_command(&root.0, Some(InitTarget::Workspace)).unwrap();
+        let service = root.0.join("services/api");
+        std::fs::create_dir_all(&service).unwrap();
+        commands::init_command(&service, Some(InitTarget::Service)).unwrap();
+        let (keys, vault) = initialize_services(&service).unwrap();
+        assert!(keys.vault_signature_key("services/api").is_ok());
+        assert!(vault.env_vault("production").is_ok());
+    }
+
+    #[test]
+    fn service_initialization_rejects_missing_workspace() {
+        let root = TempDir::new();
+        assert!(initialize_services(&root.0).is_err());
+    }
+}

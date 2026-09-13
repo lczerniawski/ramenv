@@ -7,6 +7,7 @@ use crate::{crypto, models, validation::ValidationRule};
 
 pub trait EncryptionKeyService {
     fn env_key(&self, environment: &str) -> Result<&str>;
+    fn set_env_key(&mut self, environment: &str, key: String);
     fn store_new_env_key(&mut self, environment: &str);
     fn remove_env_key(&mut self, environment: &str);
     fn vault_signature_key(&self, vault: &str) -> Result<&str>;
@@ -57,6 +58,10 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
                     environment
                 )
             })
+    }
+
+    fn set_env_key(&mut self, environment: &str, key: String) {
+        self.keys.insert(environment.to_string(), key);
     }
 
     fn store_new_env_key(&mut self, environment: &str) {
@@ -303,5 +308,308 @@ impl WorkspaceRegistry {
 impl WorkspaceService for WorkspaceRegistry {
     fn get_workspace_root(&self) -> PathBuf {
         self.workspace_root.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::models::{CanonicalVault, KeysFile, VaultFile, VaultMetadata, WorkspaceFile};
+
+    const ENV_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const SIGNING_KEY: &str = "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf";
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "ramenv-unit-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_keys(root: &Path) {
+        let mut file = KeysFile::default();
+        file.keys.insert("development".into(), ENV_KEY.into());
+        file.signatures.insert("/".into(), SIGNING_KEY.into());
+        std::fs::write(root.join(".ramenv.keys"), toml::to_string(&file).unwrap()).unwrap();
+    }
+
+    fn write_vault(root: &Path) {
+        let mut environments = IndexMap::new();
+        environments.insert(
+            "development".into(),
+            IndexMap::from([("API_KEY".into(), "value".into())]),
+        );
+        let canonical = serde_json::to_string(&CanonicalVault {
+            environments: environments.clone(),
+        })
+        .unwrap();
+        let file = VaultFile {
+            validation: IndexMap::new(),
+            environments,
+            metadata: VaultMetadata {
+                signature: crypto::generate_signature(&canonical, SIGNING_KEY).unwrap(),
+                signature_version: "1".into(),
+                signed_at: "2026-01-01T00:00:00Z".into(),
+            },
+        };
+        std::fs::write(
+            root.join(".ramenv.vault.toml"),
+            toml::to_string(&file).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn key_service_loads_mutates_and_persists_keys() {
+        let root = TempDir::new("keys");
+        write_keys(&root.0);
+        let mut service = LocalEncryptionKeyService::new(&root.0).unwrap();
+        assert_eq!(service.env_key("development").unwrap(), ENV_KEY);
+        assert_eq!(service.vault_signature_key("/").unwrap(), SIGNING_KEY);
+
+        service.store_new_env_key("production");
+        service.store_new_vault_signature_key("services/api");
+        assert_eq!(service.env_key("production").unwrap().len(), 64);
+        service.remove_env_key("development");
+        service.commit().unwrap();
+
+        let reloaded = LocalEncryptionKeyService::new(&root.0).unwrap();
+        assert!(reloaded.env_key("development").is_err());
+        assert_eq!(reloaded.env_key("production").unwrap().len(), 64);
+        assert_eq!(
+            reloaded.vault_signature_key("services/api").unwrap().len(),
+            128
+        );
+    }
+
+    #[test]
+    fn key_service_reports_missing_and_malformed_files() {
+        let root = TempDir::new("bad-keys");
+        assert!(LocalEncryptionKeyService::new(&root.0).is_err());
+
+        std::fs::create_dir(root.0.join(".ramenv.keys")).unwrap();
+        assert!(LocalEncryptionKeyService::new(&root.0).is_err());
+        std::fs::remove_dir(root.0.join(".ramenv.keys")).unwrap();
+        std::fs::write(root.0.join(".ramenv.keys"), "not = [valid").unwrap();
+        assert!(LocalEncryptionKeyService::new(&root.0).is_err());
+    }
+
+    #[test]
+    fn key_service_commit_fails_if_backing_file_was_removed() {
+        let root = TempDir::new("removed-keys");
+        write_keys(&root.0);
+        let service = LocalEncryptionKeyService::new(&root.0).unwrap();
+        std::fs::remove_file(root.0.join(".ramenv.keys")).unwrap();
+        assert!(service.commit().is_err());
+    }
+
+    #[test]
+    fn key_service_commit_reports_an_unwritable_backing_path() {
+        let root = TempDir::new("unwritable-keys");
+        write_keys(&root.0);
+        let service = LocalEncryptionKeyService::new(&root.0).unwrap();
+        std::fs::remove_file(root.0.join(".ramenv.keys")).unwrap();
+        std::fs::create_dir(root.0.join(".ramenv.keys")).unwrap();
+        assert!(service.commit().is_err());
+    }
+
+    #[test]
+    fn vault_registry_verifies_and_persists_all_mutations() {
+        let root = TempDir::new("vault");
+        write_vault(&root.0);
+        let mut registry = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        assert_eq!(
+            registry.env_vault("development").unwrap()["API_KEY"],
+            "value"
+        );
+        assert!(registry.env_vault("missing").is_err());
+
+        registry
+            .merge_env_vault(
+                "development",
+                IndexMap::from([("OTHER".into(), "second".into())]),
+            )
+            .unwrap();
+        assert!(
+            registry
+                .merge_env_vault("missing", IndexMap::new())
+                .is_err()
+        );
+        registry.set_env_vault("production", IndexMap::new());
+        registry.remove_env_vault("production");
+        let rules = IndexMap::from([(
+            "API_KEY".into(),
+            ValidationRule::new(
+                crate::validation::RuleType::String {
+                    min_len: Some(1),
+                    max_len: None,
+                },
+                true,
+            ),
+        )]);
+        registry.set_validation_rules(rules);
+        registry.commit().unwrap();
+
+        let reloaded = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let vault = reloaded.env_vault("development").unwrap();
+        assert_eq!(vault["OTHER"], "second");
+        assert!(reloaded.validation_rules().contains_key("API_KEY"));
+    }
+
+    #[test]
+    fn vault_registry_rejects_missing_malformed_tampered_and_wrongly_signed_files() {
+        let root = TempDir::new("bad-vault");
+        assert!(VaultRegistry::new(&root.0, SIGNING_KEY).is_err());
+        std::fs::write(root.0.join(".ramenv.vault.toml"), "bad = [toml").unwrap();
+        assert!(VaultRegistry::new(&root.0, SIGNING_KEY).is_err());
+
+        write_vault(&root.0);
+        assert!(VaultRegistry::new(&root.0, ENV_KEY).is_err());
+        let mut file: VaultFile =
+            toml::from_str(&std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap())
+                .unwrap();
+        file.environments
+            .get_mut("development")
+            .unwrap()
+            .insert("TAMPERED".into(), "yes".into());
+        std::fs::write(
+            root.0.join(".ramenv.vault.toml"),
+            toml::to_string(&file).unwrap(),
+        )
+        .unwrap();
+        assert!(VaultRegistry::new(&root.0, SIGNING_KEY).is_err());
+    }
+
+    #[test]
+    fn vault_commit_fails_if_backing_file_was_removed() {
+        let root = TempDir::new("removed-vault");
+        write_vault(&root.0);
+        let registry = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        std::fs::remove_file(root.0.join(".ramenv.vault.toml")).unwrap();
+        assert!(registry.commit().is_err());
+    }
+
+    #[test]
+    fn vault_commit_reports_an_unwritable_backing_path() {
+        let root = TempDir::new("unwritable-vault");
+        write_vault(&root.0);
+        let registry = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        std::fs::remove_file(root.0.join(".ramenv.vault.toml")).unwrap();
+        std::fs::create_dir(root.0.join(".ramenv.vault.toml")).unwrap();
+        assert!(registry.commit().is_err());
+    }
+
+    #[test]
+    fn workspace_registry_finds_parent_from_nested_directory() {
+        let root = TempDir::new("workspace");
+        let nested = root.0.join("services/api/src");
+        std::fs::create_dir_all(&nested).unwrap();
+        let workspace = WorkspaceFile::new("1".into(), "monorepo".into());
+        std::fs::write(
+            root.0.join(".ramenv.workspace.toml"),
+            toml::to_string(&workspace).unwrap(),
+        )
+        .unwrap();
+        let registry = WorkspaceRegistry::new(&nested).unwrap();
+        assert_eq!(registry.get_workspace_root(), root.0);
+    }
+
+    #[test]
+    fn workspace_registry_reports_incomplete_malformed_and_absent_workspaces() {
+        let root = TempDir::new("incomplete-workspace");
+        std::fs::write(root.0.join(".ramenv.keys"), "keys = {}").unwrap();
+        assert!(WorkspaceRegistry::new(&root.0).is_err());
+
+        std::fs::write(root.0.join(".ramenv.workspace.toml"), "bad = true").unwrap();
+        assert!(WorkspaceRegistry::new(&root.0).is_err());
+
+        std::fs::remove_file(root.0.join(".ramenv.keys")).unwrap();
+        std::fs::remove_file(root.0.join(".ramenv.workspace.toml")).unwrap();
+        std::fs::create_dir(root.0.join(".git")).unwrap();
+        assert!(WorkspaceRegistry::new(&root.0).is_err());
+    }
+
+    #[test]
+    fn create_environment_rolls_back_persisted_key_when_vault_write_fails() {
+        let root = TempDir::new("create-rollback");
+        write_keys(&root.0);
+        write_vault(&root.0);
+        let vault_path = root.0.join(".ramenv.vault.toml");
+        let original_vault = std::fs::read_to_string(&vault_path).unwrap();
+        let mut keys = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let mut vault = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        std::fs::remove_file(&vault_path).unwrap();
+        std::fs::create_dir(&vault_path).unwrap();
+
+        assert!(crate::commands::create_env_command("staging", &mut keys, &mut vault).is_err());
+        let persisted_keys = LocalEncryptionKeyService::new(&root.0).unwrap();
+        assert!(persisted_keys.env_key("staging").is_err());
+        assert!(vault.env_vault("staging").is_err());
+
+        std::fs::remove_dir(&vault_path).unwrap();
+        std::fs::write(&vault_path, original_vault).unwrap();
+    }
+
+    #[test]
+    fn remove_environment_restores_persisted_key_when_vault_write_fails() {
+        let root = TempDir::new("remove-rollback");
+        write_keys(&root.0);
+        write_vault(&root.0);
+        let vault_path = root.0.join(".ramenv.vault.toml");
+        let original_vault = std::fs::read_to_string(&vault_path).unwrap();
+        let mut keys = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let mut vault = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        std::fs::remove_file(&vault_path).unwrap();
+        std::fs::create_dir(&vault_path).unwrap();
+
+        assert!(crate::commands::remove_env_command("development", &mut keys, &mut vault).is_err());
+        let persisted_keys = LocalEncryptionKeyService::new(&root.0).unwrap();
+        assert_eq!(persisted_keys.env_key("development").unwrap(), ENV_KEY);
+        assert!(vault.env_vault("development").is_ok());
+
+        std::fs::remove_dir(&vault_path).unwrap();
+        std::fs::write(&vault_path, original_vault).unwrap();
+    }
+
+    #[test]
+    fn rotate_restores_persisted_vault_when_key_write_fails() {
+        let root = TempDir::new("rotate-rollback");
+        write_keys(&root.0);
+        write_vault(&root.0);
+        let keys_path = root.0.join(".ramenv.keys");
+        let original_keys = std::fs::read_to_string(&keys_path).unwrap();
+        let mut keys = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let mut vault = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        std::fs::remove_file(&keys_path).unwrap();
+        std::fs::create_dir(&keys_path).unwrap();
+
+        assert!(crate::commands::rotate_command("development", &mut keys, &mut vault).is_err());
+        std::fs::remove_dir(&keys_path).unwrap();
+        std::fs::write(&keys_path, original_keys).unwrap();
+
+        let reloaded = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        assert_eq!(
+            reloaded.env_vault("development").unwrap()["API_KEY"],
+            "value"
+        );
+        assert_eq!(keys.env_key("development").unwrap(), ENV_KEY);
     }
 }

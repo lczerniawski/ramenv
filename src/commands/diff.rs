@@ -58,3 +58,58 @@ pub fn diff_command(
     println!("{table}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use indexmap::IndexMap;
+
+    use super::*;
+    use crate::commands::test_support::{KEY, Keys, Vault};
+
+    fn services() -> (Keys, Vault) {
+        let keys = Keys {
+            values: IndexMap::from([("one".into(), KEY.into()), ("two".into(), KEY.into())]),
+            ..Keys::default()
+        };
+        let vault = Vault {
+            environments: IndexMap::from([
+                (
+                    "one".into(),
+                    IndexMap::from([
+                        ("SAME".into(), "same".into()),
+                        ("CHANGED".into(), "one".into()),
+                        ("ONLY_ONE".into(), "first".into()),
+                    ]),
+                ),
+                (
+                    "two".into(),
+                    IndexMap::from([
+                        ("SAME".into(), "same".into()),
+                        ("CHANGED".into(), "two".into()),
+                        ("ONLY_TWO".into(), "second".into()),
+                    ]),
+                ),
+            ]),
+            ..Vault::default()
+        };
+        (keys, vault)
+    }
+
+    #[test]
+    fn handles_equal_changed_and_one_sided_values_in_both_display_modes() {
+        let (keys, vault) = services();
+        assert!(diff_command("one", "two", false, &keys, &vault).is_ok());
+        assert!(diff_command("one", "two", true, &keys, &vault).is_ok());
+    }
+
+    #[test]
+    fn reports_missing_state_and_bad_ciphertext() {
+        let (keys, vault) = services();
+        assert!(diff_command("missing", "two", false, &keys, &vault).is_err());
+        assert!(diff_command("one", "missing", false, &keys, &vault).is_err());
+
+        let mut vault = vault;
+        vault.environments["one"].insert("BAD".into(), "secret:bad".into());
+        assert!(diff_command("one", "two", false, &keys, &vault).is_err());
+    }
+}
