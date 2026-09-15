@@ -5,15 +5,15 @@ use crate::validation::ValidationRule;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeysFile {
-    pub keys: IndexMap<String, String>,
-    pub signatures: IndexMap<String, String>,
+    pub encryption_keys: IndexMap<String, String>,
+    pub signature_keys: IndexMap<String, String>,
 }
 
 impl Default for KeysFile {
     fn default() -> Self {
         Self {
-            keys: IndexMap::new(),
-            signatures: IndexMap::new(),
+            encryption_keys: IndexMap::new(),
+            signature_keys: IndexMap::new(),
         }
     }
 }
@@ -79,8 +79,8 @@ mod tests {
     #[test]
     fn defaults_are_empty_and_serializable() {
         let keys = KeysFile::default();
-        assert!(keys.keys.is_empty());
-        assert!(keys.signatures.is_empty());
+        assert!(keys.encryption_keys.is_empty());
+        assert!(keys.signature_keys.is_empty());
 
         let vault = VaultFile::default();
         assert!(vault.validation.is_empty());

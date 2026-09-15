@@ -17,8 +17,8 @@ pub trait EncryptionKeyService {
 
 pub struct LocalEncryptionKeyService {
     keys_path: PathBuf,
-    keys: IndexMap<String, String>,
-    signatures: IndexMap<String, String>,
+    encryption_keys: IndexMap<String, String>,
+    signature_keys: IndexMap<String, String>,
 }
 
 impl LocalEncryptionKeyService {
@@ -39,8 +39,8 @@ impl LocalEncryptionKeyService {
             .map(|key_file| {
                 Ok(Self {
                     keys_path: keys_file_path,
-                    keys: key_file.keys,
-                    signatures: key_file.signatures,
+                    encryption_keys: key_file.encryption_keys,
+                    signature_keys: key_file.signature_keys,
                 })
             })
             .unwrap_or_else(|| anyhow::bail!("failed to initialize encryption key service"))
@@ -49,7 +49,7 @@ impl LocalEncryptionKeyService {
 
 impl EncryptionKeyService for LocalEncryptionKeyService {
     fn env_key(&self, environment: &str) -> Result<&str> {
-        self.keys
+        self.encryption_keys
             .get(environment)
             .map(|s| s.as_str())
             .ok_or_else(|| {
@@ -61,20 +61,20 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
     }
 
     fn set_env_key(&mut self, environment: &str, key: String) {
-        self.keys.insert(environment.to_string(), key);
+        self.encryption_keys.insert(environment.to_string(), key);
     }
 
     fn store_new_env_key(&mut self, environment: &str) {
-        self.keys
+        self.encryption_keys
             .insert(environment.to_string(), crypto::generate_master_key_hex());
     }
 
     fn remove_env_key(&mut self, environment: &str) {
-        self.keys.shift_remove(environment);
+        self.encryption_keys.shift_remove(environment);
     }
 
     fn vault_signature_key(&self, vault: &str) -> Result<&str> {
-        self.signatures
+        self.signature_keys
             .get(vault)
             .map(|s| s.as_str())
             .ok_or_else(|| {
@@ -86,7 +86,7 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
     }
 
     fn store_new_vault_signature_key(&mut self, vault: &str) {
-        self.signatures
+        self.signature_keys
             .insert(vault.to_string(), crypto::generate_signature_key_hex());
     }
 
@@ -96,8 +96,8 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
         }
 
         let new_keys_file_content = models::KeysFile {
-            keys: self.keys.clone(),
-            signatures: self.signatures.clone(),
+            encryption_keys: self.encryption_keys.clone(),
+            signature_keys: self.signature_keys.clone(),
         };
         let new_keys_file_content =
             toml::to_string(&new_keys_file_content).context("failed to serialize keys to TOML")?;
@@ -346,8 +346,9 @@ mod tests {
 
     fn write_keys(root: &Path) {
         let mut file = KeysFile::default();
-        file.keys.insert("development".into(), ENV_KEY.into());
-        file.signatures.insert("/".into(), SIGNING_KEY.into());
+        file.encryption_keys
+            .insert("development".into(), ENV_KEY.into());
+        file.signature_keys.insert("/".into(), SIGNING_KEY.into());
         std::fs::write(root.join(".ramenv.keys"), toml::to_string(&file).unwrap()).unwrap();
     }
 

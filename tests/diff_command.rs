@@ -73,15 +73,15 @@ fn write_workspace_file(workspace: &Path) {
 }
 
 fn write_keys_file(workspace: &Path, keys: &[(&str, &str)]) {
-    let mut signatures = IndexMap::new();
-    signatures.insert("/".to_string(), SIGNATURE_KEY_HEX.to_string());
+    let mut signature_keys = IndexMap::new();
+    signature_keys.insert("/".to_string(), SIGNATURE_KEY_HEX.to_string());
 
     let keys = KeysFile {
-        keys: keys
+        encryption_keys: keys
             .iter()
             .map(|(environment, key)| ((*environment).to_string(), (*key).to_string()))
             .collect(),
-        signatures,
+        signature_keys,
     };
 
     std::fs::write(

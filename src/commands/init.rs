@@ -118,9 +118,9 @@ fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
     }
 
     let mut keys = models::KeysFile::default();
-    keys.keys
+    keys.encryption_keys
         .insert("development".to_string(), crypto::generate_master_key_hex());
-    keys.keys
+    keys.encryption_keys
         .insert("production".to_string(), crypto::generate_master_key_hex());
 
     let serialized_keys =
@@ -264,7 +264,7 @@ mod tests {
         ));
         let keys: models::KeysFile =
             toml::from_str(&std::fs::read_to_string(root.0.join(".ramenv.keys")).unwrap()).unwrap();
-        assert_eq!(keys.keys.len(), 2);
+        assert_eq!(keys.encryption_keys.len(), 2);
         assert!(matches!(
             init_keys_file(&root.0).unwrap(),
             InitStatus::Skipped
@@ -303,8 +303,12 @@ mod tests {
             environments: vault.environments.clone(),
         })
         .unwrap();
-        crypto::verify_signature(&canonical, &vault.metadata.signature, &keys.signatures["/"])
-            .unwrap();
+        crypto::verify_signature(
+            &canonical,
+            &vault.metadata.signature,
+            &keys.signature_keys["/"],
+        )
+        .unwrap();
 
         let before = std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap();
         init_command(&root.0, None).unwrap();

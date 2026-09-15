@@ -66,8 +66,8 @@ fn write_fixture(root: &Path, entries: IndexMap<String, String>) {
     .unwrap();
 
     let keys = KeysFile {
-        keys: IndexMap::from([("development".into(), KEY.into())]),
-        signatures: IndexMap::from([("/".into(), SIGNING_KEY.into())]),
+        encryption_keys: IndexMap::from([("development".into(), KEY.into())]),
+        signature_keys: IndexMap::from([("/".into(), SIGNING_KEY.into())]),
     };
     std::fs::write(root.join(".ramenv.keys"), toml::to_string(&keys).unwrap()).unwrap();
 
@@ -139,9 +139,9 @@ fn init_creates_a_complete_valid_workspace_and_is_idempotent() {
     assert!(gitignore.lines().any(|line| line == ".env"));
     assert!(gitignore.lines().any(|line| line == ".ramenv.keys"));
     let keys = read_keys(&workspace.0);
-    assert_eq!(keys.keys.len(), 2);
-    assert_eq!(keys.keys["development"].len(), 64);
-    assert_eq!(keys.keys["production"].len(), 64);
+    assert_eq!(keys.encryption_keys.len(), 2);
+    assert_eq!(keys.encryption_keys["development"].len(), 64);
+    assert_eq!(keys.encryption_keys["production"].len(), 64);
     let workspace_file: WorkspaceFile = toml::from_str(
         &std::fs::read_to_string(workspace.0.join(".ramenv.workspace.toml")).unwrap(),
     )
@@ -153,7 +153,7 @@ fn init_creates_a_complete_valid_workspace_and_is_idempotent() {
     );
     let vault = read_vault(&workspace.0);
     assert_eq!(vault.environments.len(), 2);
-    assert_valid_signature(&vault, &keys.signatures["/"]);
+    assert_valid_signature(&vault, &keys.signature_keys["/"]);
 
     let original_keys = std::fs::read_to_string(workspace.0.join(".ramenv.keys")).unwrap();
     assert_success(&run(&workspace.0, &["init"]));
@@ -176,8 +176,8 @@ fn workspace_and_service_init_support_a_nested_monorepo() {
     assert_success(&run(&service, &["init", "service"]));
     assert!(service.join(".ramenv.vault.toml").exists());
     let keys = read_keys(&workspace.0);
-    assert!(keys.signatures.contains_key("services/api"));
-    assert_valid_signature(&read_vault(&service), &keys.signatures["services/api"]);
+    assert!(keys.signature_keys.contains_key("services/api"));
+    assert_valid_signature(&read_vault(&service), &keys.signature_keys["services/api"]);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn create_and_remove_env_update_both_files_and_reject_duplicates() {
     let workspace = Workspace::new();
     assert_success(&run(&workspace.0, &["init"]));
     assert_success(&run(&workspace.0, &["create-env", "staging"]));
-    assert_eq!(read_keys(&workspace.0).keys["staging"].len(), 64);
+    assert_eq!(read_keys(&workspace.0).encryption_keys["staging"].len(), 64);
     assert!(read_vault(&workspace.0).environments["staging"].is_empty());
 
     let duplicate = run(&workspace.0, &["create-env", "staging"]);
@@ -193,7 +193,11 @@ fn create_and_remove_env_update_both_files_and_reject_duplicates() {
     assert!(stderr(&duplicate).contains("already exists"));
 
     assert_success(&run(&workspace.0, &["remove-env", "staging"]));
-    assert!(!read_keys(&workspace.0).keys.contains_key("staging"));
+    assert!(
+        !read_keys(&workspace.0)
+            .encryption_keys
+            .contains_key("staging")
+    );
     assert!(
         !read_vault(&workspace.0)
             .environments
@@ -264,7 +268,7 @@ fn rotate_reencrypts_secrets_but_preserves_plain_values() {
     );
 
     assert_success(&run(&workspace.0, &["rotate", "development"]));
-    let new_key = read_keys(&workspace.0).keys["development"].clone();
+    let new_key = read_keys(&workspace.0).encryption_keys["development"].clone();
     let vault = read_vault(&workspace.0);
     let rotated = &vault.environments["development"]["API_KEY"];
     assert_ne!(new_key, KEY);
