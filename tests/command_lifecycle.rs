@@ -7,7 +7,7 @@ use std::{
 use indexmap::IndexMap;
 use ramenv::{
     crypto,
-    models::{CanonicalVault, KeysFile, VaultFile, VaultMetadata, WorkspaceFile},
+    models::{CanonicalVault, KeysFile, Provider, VaultFile, VaultMetadata, WorkspaceFile},
     validation::{RuleType, ValidationRule},
 };
 
@@ -61,7 +61,12 @@ fn assert_success(output: &Output) {
 fn write_fixture(root: &Path, entries: IndexMap<String, String>) {
     std::fs::write(
         root.join(".ramenv.workspace.toml"),
-        toml::to_string(&WorkspaceFile::new("1".into(), "test".into())).unwrap(),
+        toml::to_string(&WorkspaceFile::new(
+            "1".into(),
+            "test".into(),
+            Provider::Local,
+        ))
+        .unwrap(),
     )
     .unwrap();
 

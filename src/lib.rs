@@ -8,10 +8,8 @@ use env_logger::Env;
 use log::error;
 use services::WorkspaceService;
 
+use crate::models::Provider;
 use crate::services::EncryptionKeyService;
-
-// TODO Key Provider to be installed as a plugin from cargo the same way it is done for pi agent harness
-// TODO menu -> list of providers, ingredient -> type of provider
 
 mod commands;
 pub mod crypto;
@@ -27,6 +25,8 @@ pub mod validation;
     about = "Secure Environment Variable Manager"
 )]
 enum Cli {
+    /// Display the menu of available ingredients (providers)
+    Menu,
     /// Initialize ramenv (creates workspace + vault if no target specified)
     ///
     /// Single repo: `ramenv init` (creates all files in current dir)
@@ -35,6 +35,8 @@ enum Cli {
         /// Target to initialize: workspace (keys + metadata) or service (vault only)
         #[command(subcommand)]
         target: Option<InitTarget>,
+        #[arg(long, value_enum)]
+        ingredient: Option<Provider>,
     },
     /// Move the existing secrets from the .env file into the vault file
     Onboard(OnboardArgs),
@@ -62,7 +64,10 @@ enum Cli {
 enum InitTarget {
     /// Initialize workspace (.ramenv.workspace.toml + .ramenv.keys)
     /// Use at monorepo root - keys are shared by all services
-    Workspace,
+    Workspace {
+        #[arg(long, value_enum)]
+        ingredient: Option<Provider>,
+    },
     /// Initialize service vault (.ramenv.vault.toml)
     /// Use in each service dir - stores service-specific encrypted secrets
     Service,
@@ -156,7 +161,10 @@ pub fn run_cli() {
 
     let cli = Cli::parse();
     let result = match cli {
-        Cli::Init { target } => commands::init_command(&current_working_path, target),
+        Cli::Menu => commands::menu_command(),
+        Cli::Init { target, ingredient } => {
+            commands::init_command(&current_working_path, target, ingredient)
+        }
         Cli::Onboard(args) => {
             let (encryption_key_service, mut vault_service) =
                 initialize_services(&current_working_path).unwrap_or_else(|err| {
@@ -340,7 +348,7 @@ mod tests {
     #[test]
     fn initializes_services_for_single_repository() {
         let root = TempDir::new();
-        commands::init_command(&root.0, None).unwrap();
+        commands::init_command(&root.0, None, None).unwrap();
         let (keys, vault) = initialize_services(&root.0).unwrap();
         assert_eq!(keys.env_key("development").unwrap().len(), 64);
         assert!(vault.env_vault("development").is_ok());
@@ -349,10 +357,15 @@ mod tests {
     #[test]
     fn initializes_services_for_nested_monorepo_vault() {
         let root = TempDir::new();
-        commands::init_command(&root.0, Some(InitTarget::Workspace)).unwrap();
+        commands::init_command(
+            &root.0,
+            Some(InitTarget::Workspace { ingredient: None }),
+            None,
+        )
+        .unwrap();
         let service = root.0.join("services/api");
         std::fs::create_dir_all(&service).unwrap();
-        commands::init_command(&service, Some(InitTarget::Service)).unwrap();
+        commands::init_command(&service, Some(InitTarget::Service), None).unwrap();
         let (keys, vault) = initialize_services(&service).unwrap();
         assert!(keys.vault_signature_key("services/api").is_ok());
         assert!(vault.env_vault("production").is_ok());

@@ -1,3 +1,4 @@
+use clap::ValueEnum;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -61,15 +62,26 @@ impl Default for VaultMetadata {
 pub struct WorkspaceFile {
     pub workspace_name: String,
     pub schema_version: String,
+    pub ingredient: Provider,
 }
 
 impl WorkspaceFile {
-    pub fn new(schema_version: String, project_name: String) -> Self {
+    pub fn new(schema_version: String, project_name: String, provider: Provider) -> Self {
         Self {
             workspace_name: project_name,
             schema_version,
+            ingredient: provider,
         }
     }
+}
+
+#[derive(Clone, Debug, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Local,
+    Azure,
+    Google,
+    Aws,
 }
 
 #[cfg(test)]
@@ -94,7 +106,7 @@ mod tests {
 
     #[test]
     fn workspace_constructor_preserves_arguments() {
-        let workspace = WorkspaceFile::new("2".into(), "payments".into());
+        let workspace = WorkspaceFile::new("2".into(), "payments".into(), Provider::Local);
         assert_eq!(workspace.schema_version, "2");
         assert_eq!(workspace.workspace_name, "payments");
     }

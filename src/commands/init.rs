@@ -5,15 +5,22 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+use crate::models::Provider;
 use crate::services::{EncryptionKeyService, WorkspaceService};
 use crate::{InitTarget, crypto, models, services};
 
-pub fn init_command(current_working_path: &Path, init_target: Option<InitTarget>) -> Result<()> {
+pub fn init_command(
+    current_working_path: &Path,
+    init_target: Option<InitTarget>,
+    provider: Option<Provider>,
+) -> Result<()> {
     match init_target {
-        Some(InitTarget::Workspace) => init_workspace(current_working_path)?,
+        Some(InitTarget::Workspace { ingredient }) => {
+            init_workspace(current_working_path, ingredient)?
+        }
         Some(InitTarget::Service) => init_service(current_working_path)?,
         None => {
-            init_workspace(current_working_path)?;
+            init_workspace(current_working_path, provider)?;
             init_service(current_working_path)?;
         }
     }
@@ -22,7 +29,7 @@ pub fn init_command(current_working_path: &Path, init_target: Option<InitTarget>
     Ok(())
 }
 
-fn init_workspace(current_working_path: &Path) -> Result<()> {
+fn init_workspace(current_working_path: &Path, provider: Option<Provider>) -> Result<()> {
     match init_gitignore(current_working_path)? {
         InitStatus::Updated => info!(".gitignore file updated with required files"),
         InitStatus::Skipped => info!("all required files are already in .gitignore"),
@@ -35,7 +42,7 @@ fn init_workspace(current_working_path: &Path) -> Result<()> {
         _ => {}
     }
 
-    match init_workspace_file(current_working_path)? {
+    match init_workspace_file(current_working_path, provider)? {
         InitStatus::Created => info!(".ramenv.workspace.toml file created successfully"),
         InitStatus::Skipped => {
             info!(".ramenv.workspace.toml file already exists, skipping")
@@ -118,6 +125,7 @@ fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
     }
 
     let mut keys = models::KeysFile::default();
+    // TODO based on the provider, set the secret in the provider, and save to the .keys file under correct name the URL for secret for the provider.
     keys.encryption_keys
         .insert("development".to_string(), crypto::generate_master_key_hex());
     keys.encryption_keys
@@ -154,6 +162,7 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
 
     let mut encryption_key_service =
         services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())?;
+    // TODO based on the provider, set the secret in the provider, and save to the .keys file under correct name the URL for secret for the provider.
     encryption_key_service.store_new_vault_signature_key(vault_name);
     encryption_key_service.commit()?;
 
@@ -177,7 +186,10 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
     Ok(InitStatus::Created)
 }
 
-fn init_workspace_file(current_working_path: &Path) -> Result<InitStatus> {
+fn init_workspace_file(
+    current_working_path: &Path,
+    provider: Option<Provider>,
+) -> Result<InitStatus> {
     let workspace_path = current_working_path.join(".ramenv.workspace.toml");
     if (workspace_path).exists() {
         return Ok(InitStatus::Skipped);
@@ -188,7 +200,8 @@ fn init_workspace_file(current_working_path: &Path) -> Result<InitStatus> {
         .map(|os_str| os_str.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unknown_project".to_string());
 
-    let workspace = models::WorkspaceFile::new("1".to_string(), project_name);
+    let provider = provider.unwrap_or(Provider::Local);
+    let workspace = models::WorkspaceFile::new("1".to_string(), project_name, provider);
     let serialized_workspace = toml::to_string(&workspace)?;
     std::fs::write(&workspace_path, &serialized_workspace)?;
 
@@ -271,7 +284,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            init_workspace_file(&root.0).unwrap(),
+            init_workspace_file(&root.0, None).unwrap(),
             InitStatus::Created
         ));
         let workspace: models::WorkspaceFile = toml::from_str(
@@ -284,7 +297,7 @@ mod tests {
             root.0.file_name().unwrap().to_string_lossy()
         );
         assert!(matches!(
-            init_workspace_file(&root.0).unwrap(),
+            init_workspace_file(&root.0, None).unwrap(),
             InitStatus::Skipped
         ));
     }
@@ -292,7 +305,7 @@ mod tests {
     #[test]
     fn full_init_creates_signed_vault_and_is_idempotent() {
         let root = TempDir::new();
-        init_command(&root.0, None).unwrap();
+        init_command(&root.0, None, None).unwrap();
         let keys: models::KeysFile =
             toml::from_str(&std::fs::read_to_string(root.0.join(".ramenv.keys")).unwrap()).unwrap();
         let vault: models::VaultFile =
@@ -311,7 +324,7 @@ mod tests {
         .unwrap();
 
         let before = std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap();
-        init_command(&root.0, None).unwrap();
+        init_command(&root.0, None, None).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap(),
             before
@@ -321,8 +334,13 @@ mod tests {
     #[test]
     fn service_init_fails_without_workspace_and_workspace_target_omits_vault() {
         let root = TempDir::new();
-        assert!(init_command(&root.0, Some(InitTarget::Service)).is_err());
-        init_command(&root.0, Some(InitTarget::Workspace)).unwrap();
+        assert!(init_command(&root.0, Some(InitTarget::Service), None).is_err());
+        init_command(
+            &root.0,
+            Some(InitTarget::Workspace { ingredient: None }),
+            None,
+        )
+        .unwrap();
         assert!(!root.0.join(".ramenv.vault.toml").exists());
     }
 }

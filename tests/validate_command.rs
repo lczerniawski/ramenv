@@ -7,7 +7,7 @@ use std::{
 use indexmap::IndexMap;
 use ramenv::{
     crypto,
-    models::{CanonicalVault, KeysFile, VaultFile, VaultMetadata, WorkspaceFile},
+    models::{CanonicalVault, KeysFile, Provider, VaultFile, VaultMetadata, WorkspaceFile},
     validation::{RuleType, ValidationRule},
 };
 
@@ -66,7 +66,11 @@ fn run_validate(workspace: &Path, environment: Option<&str>) -> Output {
 }
 
 fn write_workspace_file(workspace: &Path) {
-    let workspace_file = WorkspaceFile::new("1".to_string(), "test-workspace".to_string());
+    let workspace_file = WorkspaceFile::new(
+        "1".to_string(),
+        "test-workspace".to_string(),
+        Provider::Local,
+    );
     std::fs::write(
         workspace.join(".ramenv.workspace.toml"),
         toml::to_string(&workspace_file).expect("serialize workspace"),

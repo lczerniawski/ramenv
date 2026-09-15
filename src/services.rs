@@ -316,7 +316,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::models::{CanonicalVault, KeysFile, VaultFile, VaultMetadata, WorkspaceFile};
+    use crate::models::{
+        CanonicalVault, KeysFile, Provider, VaultFile, VaultMetadata, WorkspaceFile,
+    };
 
     const ENV_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const SIGNING_KEY: &str = "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf";
@@ -523,7 +525,7 @@ mod tests {
         let root = TempDir::new("workspace");
         let nested = root.0.join("services/api/src");
         std::fs::create_dir_all(&nested).unwrap();
-        let workspace = WorkspaceFile::new("1".into(), "monorepo".into());
+        let workspace = WorkspaceFile::new("1".into(), "monorepo".into(), Provider::Local);
         std::fs::write(
             root.0.join(".ramenv.workspace.toml"),
             toml::to_string(&workspace).unwrap(),
