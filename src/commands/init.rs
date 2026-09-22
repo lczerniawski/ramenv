@@ -6,8 +6,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 use crate::models::Provider;
-use crate::services::{EncryptionKeyService, WorkspaceService};
-use crate::{InitTarget, crypto, models, services};
+use crate::services::{EncryptionKeyService, VaultService, WorkspaceService};
+use crate::{InitTarget, models, services};
 
 pub fn init_command(
     current_working_path: &Path,
@@ -124,16 +124,11 @@ fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
         return Ok(InitStatus::Skipped);
     }
 
-    let mut keys = models::KeysFile::default();
+    let mut keys = services::KeyService::<services::LocalKeyStore>::empty(current_working_path);
     // TODO based on the provider, set the secret in the provider, and save to the .keys file under correct name the URL for secret for the provider.
-    keys.encryption_keys
-        .insert("development".to_string(), crypto::generate_master_key_hex());
-    keys.encryption_keys
-        .insert("production".to_string(), crypto::generate_master_key_hex());
-
-    let serialized_keys =
-        toml::to_string(&keys).context("failed to serialize .ramenv.keys file")?;
-    std::fs::write(&keys_path, &serialized_keys).context("failed to write .ramenv.keys to disc")?;
+    keys.store_new_env_key("development");
+    keys.store_new_env_key("production");
+    keys.create()?;
 
     Ok(InitStatus::Created)
 }
@@ -144,15 +139,7 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
         return Ok(InitStatus::Skipped);
     }
 
-    let mut vault = models::VaultFile::default();
-    vault
-        .environments
-        .insert("development".to_string(), IndexMap::new());
-    vault
-        .environments
-        .insert("production".to_string(), IndexMap::new());
-
-    let workspace_registry = services::WorkspaceRegistry::new(current_working_path)?;
+    let workspace_registry = services::WorkspaceRegistry::load(current_working_path)?;
     let workspace_root = workspace_registry.get_workspace_root();
     let vault_name = current_working_path
         .strip_prefix(workspace_root)?
@@ -160,28 +147,18 @@ fn init_vault_file(current_working_path: &Path) -> Result<InitStatus> {
         .map(|s| if s.is_empty() { "/" } else { s })
         .unwrap_or("/");
 
-    let mut encryption_key_service =
-        services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())?;
+    let mut encryption_key_service = services::KeyService::<services::LocalKeyStore>::load(
+        &workspace_registry.get_workspace_root(),
+    )?;
     // TODO based on the provider, set the secret in the provider, and save to the .keys file under correct name the URL for secret for the provider.
     encryption_key_service.store_new_vault_signature_key(vault_name);
     encryption_key_service.commit()?;
 
     let vault_signing_key = encryption_key_service.vault_signature_key(vault_name)?;
-    let canonical_vault = models::CanonicalVault {
-        environments: vault.environments.clone(),
-    };
-    let canonical_vault_str = serde_json::to_string(&canonical_vault)
-        .context("failed to serialize vault for verification")?;
-    let signature = crypto::generate_signature(&canonical_vault_str, vault_signing_key)?;
-    let metadata = models::VaultMetadata {
-        signature,
-        signature_version: "1".to_string(),
-        signed_at: chrono::Utc::now().to_rfc3339(),
-    };
-    vault.metadata = metadata;
-
-    let serialized_vault = toml::to_string(&vault)?;
-    std::fs::write(&vault_path, &serialized_vault)?;
+    let mut vault = services::VaultRegistry::empty(current_working_path, vault_signing_key);
+    vault.set_env_vault("development", IndexMap::new());
+    vault.set_env_vault("production", IndexMap::new());
+    vault.create()?;
 
     Ok(InitStatus::Created)
 }
@@ -202,8 +179,7 @@ fn init_workspace_file(
 
     let provider = provider.unwrap_or(Provider::Local);
     let workspace = models::WorkspaceFile::new("1".to_string(), project_name, provider);
-    let serialized_workspace = toml::to_string(&workspace)?;
-    std::fs::write(&workspace_path, &serialized_workspace)?;
+    services::WorkspaceRegistry::create(current_working_path, workspace)?;
 
     Ok(InitStatus::Created)
 }
@@ -216,6 +192,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::crypto;
 
     struct TempDir(PathBuf);
 

@@ -1,3 +1,5 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Ok, Result};
@@ -15,39 +17,49 @@ pub trait EncryptionKeyService {
     fn commit(&self) -> anyhow::Result<()>;
 }
 
-pub struct LocalEncryptionKeyService {
-    keys_path: PathBuf,
+pub trait KeyStore {
+    fn load(&self) -> Result<models::KeysFile>;
+    fn create(&self, keys: &models::KeysFile) -> Result<()>;
+    fn save(&self, keys: &models::KeysFile) -> Result<()>;
+}
+
+pub struct KeyService<S: KeyStore> {
+    store: S,
     encryption_keys: IndexMap<String, String>,
     signature_keys: IndexMap<String, String>,
 }
 
-impl LocalEncryptionKeyService {
-    pub fn new(workspace_root: &Path) -> Result<Self> {
-        let keys_file_path = workspace_root.join(".ramenv.keys");
-        if !keys_file_path.exists() {
-            anyhow::bail!("keys file does not exist, please run `ramenv init` first");
+impl<S: KeyStore> KeyService<S> {
+    pub fn from_empty(store: S) -> Self {
+        Self {
+            store,
+            encryption_keys: IndexMap::new(),
+            signature_keys: IndexMap::new(),
         }
+    }
 
-        std::fs::read_to_string(keys_file_path.clone())
-            .map_err(|e| anyhow::anyhow!("failed to read keys file: {}", e))
-            .ok()
-            .and_then(|content| {
-                toml::from_str::<models::KeysFile>(&content)
-                    .map_err(|e| anyhow::anyhow!("failed to parse keys file: {}", e))
-                    .ok()
-            })
-            .map(|key_file| {
-                Ok(Self {
-                    keys_path: keys_file_path,
-                    encryption_keys: key_file.encryption_keys,
-                    signature_keys: key_file.signature_keys,
-                })
-            })
-            .unwrap_or_else(|| anyhow::bail!("failed to initialize encryption key service"))
+    pub fn from_store(store: S) -> Result<Self> {
+        let keys = store.load()?;
+        Ok(Self {
+            store,
+            encryption_keys: keys.encryption_keys,
+            signature_keys: keys.signature_keys,
+        })
+    }
+
+    fn keys_file(&self) -> models::KeysFile {
+        models::KeysFile {
+            encryption_keys: self.encryption_keys.clone(),
+            signature_keys: self.signature_keys.clone(),
+        }
+    }
+
+    pub fn create(&self) -> Result<()> {
+        self.store.create(&self.keys_file())
     }
 }
 
-impl EncryptionKeyService for LocalEncryptionKeyService {
+impl<S: KeyStore> EncryptionKeyService for KeyService<S> {
     fn env_key(&self, environment: &str) -> Result<&str> {
         self.encryption_keys
             .get(environment)
@@ -91,20 +103,86 @@ impl EncryptionKeyService for LocalEncryptionKeyService {
     }
 
     fn commit(&self) -> anyhow::Result<()> {
-        if !self.keys_path.exists() {
+        self.store.save(&self.keys_file())
+    }
+}
+
+pub struct LocalKeyStore {
+    path: PathBuf,
+}
+
+impl LocalKeyStore {
+    pub fn new(workspace_root: &Path) -> Self {
+        Self {
+            path: workspace_root.join(".ramenv.keys"),
+        }
+    }
+}
+
+fn write_file(path: &Path, content: &str, create: bool) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if create {
+        options.create_new(true);
+    } else {
+        options.truncate(true);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+impl KeyStore for LocalKeyStore {
+    fn load(&self) -> Result<models::KeysFile> {
+        if !self.path.exists() {
             anyhow::bail!("keys file does not exist, please run `ramenv init` first");
         }
+        let content = std::fs::read_to_string(&self.path)
+            .with_context(|| format!("failed to read keys file {}", self.path.display()))?;
+        toml::from_str(&content).context("failed to parse keys file")
+    }
 
-        let new_keys_file_content = models::KeysFile {
-            encryption_keys: self.encryption_keys.clone(),
-            signature_keys: self.signature_keys.clone(),
-        };
-        let new_keys_file_content =
-            toml::to_string(&new_keys_file_content).context("failed to serialize keys to TOML")?;
-        std::fs::write(&self.keys_path, &new_keys_file_content)
-            .context("failed to write to keys file")?;
+    fn create(&self, keys: &models::KeysFile) -> Result<()> {
+        write_file(
+            &self.path,
+            &toml::to_string(keys).context("failed to serialize keys")?,
+            true,
+        )
+    }
 
-        Ok(())
+    fn save(&self, keys: &models::KeysFile) -> Result<()> {
+        write_file(
+            &self.path,
+            &toml::to_string(keys).context("failed to serialize keys")?,
+            false,
+        )
+    }
+}
+
+impl KeyService<LocalKeyStore> {
+    pub fn empty(workspace_root: &Path) -> Self {
+        Self::from_empty(LocalKeyStore::new(workspace_root))
+    }
+
+    pub fn load(workspace_root: &Path) -> Result<Self> {
+        Self::from_store(LocalKeyStore::new(workspace_root))
+    }
+}
+
+// Provider implementations only supply persistence; key operations remain in KeyService.
+pub struct AzureKeyStore;
+
+impl KeyStore for AzureKeyStore {
+    fn load(&self) -> Result<models::KeysFile> {
+        todo!()
+    }
+    fn create(&self, _keys: &models::KeysFile) -> Result<()> {
+        todo!()
+    }
+    fn save(&self, _keys: &models::KeysFile) -> Result<()> {
+        todo!()
     }
 }
 
@@ -131,41 +209,65 @@ pub struct VaultRegistry {
 }
 
 impl VaultRegistry {
-    pub fn new(current_working_path: &Path, vault_signing_key: &str) -> Result<Self> {
-        let vault_file_path = Path::new(current_working_path).join(".ramenv.vault.toml");
+    pub fn empty(current_working_path: &Path, vault_signing_key: &str) -> Self {
+        Self {
+            vault_path: current_working_path.join(".ramenv.vault.toml"),
+            vault_signing_key: vault_signing_key.to_string(),
+            validation: IndexMap::new(),
+            environments: IndexMap::new(),
+        }
+    }
+
+    pub fn load(current_working_path: &Path, vault_signing_key: &str) -> Result<Self> {
+        let vault_file_path = current_working_path.join(".ramenv.vault.toml");
         if !vault_file_path.exists() {
             anyhow::bail!("vault file does not exist, please run `ramenv init` first");
         }
+        let content = std::fs::read_to_string(&vault_file_path)
+            .with_context(|| format!("failed to read vault file {}", vault_file_path.display()))?;
+        let vault_file: models::VaultFile =
+            toml::from_str(&content).context("failed to parse vault file")?;
+        let canonical_vault = models::CanonicalVault {
+            environments: vault_file.environments.clone(),
+        };
+        let canonical_value_str = serde_json::to_string(&canonical_vault)
+            .context("failed to serialize vault for verification")?;
+        crypto::verify_signature(
+            &canonical_value_str,
+            &vault_file.metadata.signature,
+            vault_signing_key,
+        )
+        .context("failed to verify vault signature")?;
 
-        std::fs::read_to_string(vault_file_path.clone())
-            .map_err(|e| anyhow::anyhow!("failed to read vault file: {}", e))
-            .ok()
-            .and_then(|content| {
-                toml::from_str::<models::VaultFile>(content.as_str())
-                    .map_err(|e| anyhow::anyhow!("failed to parse vault file: {}", e))
-                    .ok()
-            })
-            .map(|vault_file| {
-                let canonical_vault = models::CanonicalVault {
-                    environments: vault_file.environments.clone(),
-                };
-                let canonical_value_str = serde_json::to_string(&canonical_vault)
-                    .context("failed to serialize vault for verification")?;
-                crypto::verify_signature(
-                    &canonical_value_str,
-                    &vault_file.metadata.signature,
-                    vault_signing_key,
-                )
-                .context("failed to verify vault signature")?;
+        Ok(Self {
+            vault_path: vault_file_path,
+            vault_signing_key: vault_signing_key.to_string(),
+            validation: vault_file.validation,
+            environments: vault_file.environments,
+        })
+    }
 
-                Ok(Self {
-                    vault_path: vault_file_path,
-                    vault_signing_key: vault_signing_key.to_string(),
-                    validation: vault_file.validation,
-                    environments: vault_file.environments,
-                })
-            })
-            .unwrap_or_else(|| anyhow::bail!("failed to initialize vault service"))
+    fn serialize(&self) -> Result<String> {
+        let canonical_vault = models::CanonicalVault {
+            environments: self.environments.clone(),
+        };
+        let canonical_vault_str = serde_json::to_string(&canonical_vault)
+            .context("failed to serialize vault for signing")?;
+        let metadata = models::VaultMetadata {
+            signature: crypto::generate_signature(&canonical_vault_str, &self.vault_signing_key)?,
+            signature_version: "1".to_string(),
+            signed_at: chrono::Utc::now().to_rfc3339(),
+        };
+        toml::to_string(&models::VaultFile {
+            validation: self.validation.clone(),
+            environments: self.environments.clone(),
+            metadata,
+        })
+        .context("failed to serialize vault file to TOML")
+    }
+
+    pub fn create(&self) -> Result<()> {
+        write_file(&self.vault_path, &self.serialize()?, true)
     }
 }
 
@@ -209,33 +311,7 @@ impl VaultService for VaultRegistry {
     }
 
     fn commit(&self) -> anyhow::Result<()> {
-        if !self.vault_path.exists() {
-            anyhow::bail!("vault file does not exist, please run `ramenv init` first");
-        }
-
-        let canonical_vault = models::CanonicalVault {
-            environments: self.environments.clone(),
-        };
-        let canonical_vault_str = serde_json::to_string(&canonical_vault)
-            .context("failed to serialize vault for verification")?;
-        let signature = crypto::generate_signature(&canonical_vault_str, &self.vault_signing_key)?;
-        let metadata = models::VaultMetadata {
-            signature,
-            signature_version: "1".to_string(),
-            signed_at: chrono::Utc::now().to_rfc3339(),
-        };
-
-        let new_vault_file_content = models::VaultFile {
-            validation: self.validation.clone(),
-            environments: self.environments.clone(),
-            metadata,
-        };
-        let serialized_vault = toml::to_string(&new_vault_file_content)
-            .context("failed to serialize vault file to TOML")?;
-        std::fs::write(&self.vault_path, &serialized_vault)
-            .context("failed to write to vault file")?;
-
-        Ok(())
+        write_file(&self.vault_path, &self.serialize()?, false)
     }
 
     fn validation_rules(&self) -> IndexMap<String, ValidationRule> {
@@ -260,7 +336,21 @@ pub struct WorkspaceRegistry {
 }
 
 impl WorkspaceRegistry {
-    pub fn new(current_working_path: &Path) -> Result<Self> {
+    pub fn create(workspace_root: &Path, workspace: models::WorkspaceFile) -> Result<Self> {
+        let content = toml::to_string(&workspace).context("failed to serialize workspace file")?;
+        write_file(
+            &workspace_root.join(".ramenv.workspace.toml"),
+            &content,
+            true,
+        )?;
+        Ok(Self {
+            workspace_root: workspace_root.to_path_buf(),
+            workspace_name: workspace.workspace_name,
+            schema_version: workspace.schema_version,
+        })
+    }
+
+    pub fn load(current_working_path: &Path) -> Result<Self> {
         let workspace_root = Self::find_workspace_root(current_working_path)?;
         let workspace = Self::load_workspace(&workspace_root)?;
 
@@ -384,7 +474,7 @@ mod tests {
     fn key_service_loads_mutates_and_persists_keys() {
         let root = TempDir::new("keys");
         write_keys(&root.0);
-        let mut service = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let mut service = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
         assert_eq!(service.env_key("development").unwrap(), ENV_KEY);
         assert_eq!(service.vault_signature_key("/").unwrap(), SIGNING_KEY);
 
@@ -394,7 +484,7 @@ mod tests {
         service.remove_env_key("development");
         service.commit().unwrap();
 
-        let reloaded = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let reloaded = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
         assert!(reloaded.env_key("development").is_err());
         assert_eq!(reloaded.env_key("production").unwrap().len(), 64);
         assert_eq!(
@@ -404,22 +494,55 @@ mod tests {
     }
 
     #[test]
+    fn empty_services_create_loadable_files_without_overwriting_them() {
+        let root = TempDir::new("create-services");
+        let mut keys = KeyService::<LocalKeyStore>::empty(&root.0);
+        keys.store_new_env_key("development");
+        keys.store_new_vault_signature_key("/");
+        keys.create().unwrap();
+        let key_content = std::fs::read_to_string(root.0.join(".ramenv.keys")).unwrap();
+        assert!(keys.create().is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.0.join(".ramenv.keys")).unwrap(),
+            key_content
+        );
+
+        let signing_key = keys.vault_signature_key("/").unwrap();
+        let mut vault = VaultRegistry::empty(&root.0, signing_key);
+        vault.set_env_vault("development", IndexMap::new());
+        vault.create().unwrap();
+        let vault_content = std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap();
+        assert!(vault.create().is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap(),
+            vault_content
+        );
+        assert!(VaultRegistry::load(&root.0, signing_key).is_ok());
+
+        let workspace = WorkspaceFile::new("1".into(), "example".into(), Provider::Local);
+        WorkspaceRegistry::create(&root.0, workspace).unwrap();
+        assert!(WorkspaceRegistry::load(&root.0).is_ok());
+        let second = WorkspaceFile::new("2".into(), "other".into(), Provider::Local);
+        assert!(WorkspaceRegistry::create(&root.0, second).is_err());
+    }
+
+    #[test]
     fn key_service_reports_missing_and_malformed_files() {
         let root = TempDir::new("bad-keys");
-        assert!(LocalEncryptionKeyService::new(&root.0).is_err());
+        assert!(KeyService::<LocalKeyStore>::load(&root.0).is_err());
 
         std::fs::create_dir(root.0.join(".ramenv.keys")).unwrap();
-        assert!(LocalEncryptionKeyService::new(&root.0).is_err());
+        assert!(KeyService::<LocalKeyStore>::load(&root.0).is_err());
         std::fs::remove_dir(root.0.join(".ramenv.keys")).unwrap();
         std::fs::write(root.0.join(".ramenv.keys"), "not = [valid").unwrap();
-        assert!(LocalEncryptionKeyService::new(&root.0).is_err());
+        assert!(KeyService::<LocalKeyStore>::load(&root.0).is_err());
     }
 
     #[test]
     fn key_service_commit_fails_if_backing_file_was_removed() {
         let root = TempDir::new("removed-keys");
         write_keys(&root.0);
-        let service = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let service = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
         std::fs::remove_file(root.0.join(".ramenv.keys")).unwrap();
         assert!(service.commit().is_err());
     }
@@ -428,7 +551,7 @@ mod tests {
     fn key_service_commit_reports_an_unwritable_backing_path() {
         let root = TempDir::new("unwritable-keys");
         write_keys(&root.0);
-        let service = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let service = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
         std::fs::remove_file(root.0.join(".ramenv.keys")).unwrap();
         std::fs::create_dir(root.0.join(".ramenv.keys")).unwrap();
         assert!(service.commit().is_err());
@@ -438,7 +561,7 @@ mod tests {
     fn vault_registry_verifies_and_persists_all_mutations() {
         let root = TempDir::new("vault");
         write_vault(&root.0);
-        let mut registry = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let mut registry = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
         assert_eq!(
             registry.env_vault("development").unwrap()["API_KEY"],
             "value"
@@ -471,7 +594,7 @@ mod tests {
         registry.set_validation_rules(rules);
         registry.commit().unwrap();
 
-        let reloaded = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let reloaded = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
         let vault = reloaded.env_vault("development").unwrap();
         assert_eq!(vault["OTHER"], "second");
         assert!(reloaded.validation_rules().contains_key("API_KEY"));
@@ -480,12 +603,12 @@ mod tests {
     #[test]
     fn vault_registry_rejects_missing_malformed_tampered_and_wrongly_signed_files() {
         let root = TempDir::new("bad-vault");
-        assert!(VaultRegistry::new(&root.0, SIGNING_KEY).is_err());
+        assert!(VaultRegistry::load(&root.0, SIGNING_KEY).is_err());
         std::fs::write(root.0.join(".ramenv.vault.toml"), "bad = [toml").unwrap();
-        assert!(VaultRegistry::new(&root.0, SIGNING_KEY).is_err());
+        assert!(VaultRegistry::load(&root.0, SIGNING_KEY).is_err());
 
         write_vault(&root.0);
-        assert!(VaultRegistry::new(&root.0, ENV_KEY).is_err());
+        assert!(VaultRegistry::load(&root.0, ENV_KEY).is_err());
         let mut file: VaultFile =
             toml::from_str(&std::fs::read_to_string(root.0.join(".ramenv.vault.toml")).unwrap())
                 .unwrap();
@@ -498,14 +621,14 @@ mod tests {
             toml::to_string(&file).unwrap(),
         )
         .unwrap();
-        assert!(VaultRegistry::new(&root.0, SIGNING_KEY).is_err());
+        assert!(VaultRegistry::load(&root.0, SIGNING_KEY).is_err());
     }
 
     #[test]
     fn vault_commit_fails_if_backing_file_was_removed() {
         let root = TempDir::new("removed-vault");
         write_vault(&root.0);
-        let registry = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let registry = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
         std::fs::remove_file(root.0.join(".ramenv.vault.toml")).unwrap();
         assert!(registry.commit().is_err());
     }
@@ -514,7 +637,7 @@ mod tests {
     fn vault_commit_reports_an_unwritable_backing_path() {
         let root = TempDir::new("unwritable-vault");
         write_vault(&root.0);
-        let registry = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let registry = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
         std::fs::remove_file(root.0.join(".ramenv.vault.toml")).unwrap();
         std::fs::create_dir(root.0.join(".ramenv.vault.toml")).unwrap();
         assert!(registry.commit().is_err());
@@ -531,7 +654,7 @@ mod tests {
             toml::to_string(&workspace).unwrap(),
         )
         .unwrap();
-        let registry = WorkspaceRegistry::new(&nested).unwrap();
+        let registry = WorkspaceRegistry::load(&nested).unwrap();
         assert_eq!(registry.get_workspace_root(), root.0);
     }
 
@@ -539,15 +662,15 @@ mod tests {
     fn workspace_registry_reports_incomplete_malformed_and_absent_workspaces() {
         let root = TempDir::new("incomplete-workspace");
         std::fs::write(root.0.join(".ramenv.keys"), "keys = {}").unwrap();
-        assert!(WorkspaceRegistry::new(&root.0).is_err());
+        assert!(WorkspaceRegistry::load(&root.0).is_err());
 
         std::fs::write(root.0.join(".ramenv.workspace.toml"), "bad = true").unwrap();
-        assert!(WorkspaceRegistry::new(&root.0).is_err());
+        assert!(WorkspaceRegistry::load(&root.0).is_err());
 
         std::fs::remove_file(root.0.join(".ramenv.keys")).unwrap();
         std::fs::remove_file(root.0.join(".ramenv.workspace.toml")).unwrap();
         std::fs::create_dir(root.0.join(".git")).unwrap();
-        assert!(WorkspaceRegistry::new(&root.0).is_err());
+        assert!(WorkspaceRegistry::load(&root.0).is_err());
     }
 
     #[test]
@@ -557,13 +680,13 @@ mod tests {
         write_vault(&root.0);
         let vault_path = root.0.join(".ramenv.vault.toml");
         let original_vault = std::fs::read_to_string(&vault_path).unwrap();
-        let mut keys = LocalEncryptionKeyService::new(&root.0).unwrap();
-        let mut vault = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let mut keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut vault = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
         std::fs::remove_file(&vault_path).unwrap();
         std::fs::create_dir(&vault_path).unwrap();
 
         assert!(crate::commands::create_env_command("staging", &mut keys, &mut vault).is_err());
-        let persisted_keys = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let persisted_keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
         assert!(persisted_keys.env_key("staging").is_err());
         assert!(vault.env_vault("staging").is_err());
 
@@ -578,13 +701,13 @@ mod tests {
         write_vault(&root.0);
         let vault_path = root.0.join(".ramenv.vault.toml");
         let original_vault = std::fs::read_to_string(&vault_path).unwrap();
-        let mut keys = LocalEncryptionKeyService::new(&root.0).unwrap();
-        let mut vault = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let mut keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut vault = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
         std::fs::remove_file(&vault_path).unwrap();
         std::fs::create_dir(&vault_path).unwrap();
 
         assert!(crate::commands::remove_env_command("development", &mut keys, &mut vault).is_err());
-        let persisted_keys = LocalEncryptionKeyService::new(&root.0).unwrap();
+        let persisted_keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
         assert_eq!(persisted_keys.env_key("development").unwrap(), ENV_KEY);
         assert!(vault.env_vault("development").is_ok());
 
@@ -599,8 +722,8 @@ mod tests {
         write_vault(&root.0);
         let keys_path = root.0.join(".ramenv.keys");
         let original_keys = std::fs::read_to_string(&keys_path).unwrap();
-        let mut keys = LocalEncryptionKeyService::new(&root.0).unwrap();
-        let mut vault = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let mut keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut vault = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
         std::fs::remove_file(&keys_path).unwrap();
         std::fs::create_dir(&keys_path).unwrap();
 
@@ -608,7 +731,7 @@ mod tests {
         std::fs::remove_dir(&keys_path).unwrap();
         std::fs::write(&keys_path, original_keys).unwrap();
 
-        let reloaded = VaultRegistry::new(&root.0, SIGNING_KEY).unwrap();
+        let reloaded = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
         assert_eq!(
             reloaded.env_vault("development").unwrap()["API_KEY"],
             "value"

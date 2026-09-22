@@ -165,128 +165,65 @@ pub fn run_cli() {
         Cli::Init { target, ingredient } => {
             commands::init_command(&current_working_path, target, ingredient)
         }
-        Cli::Onboard(args) => {
-            let (encryption_key_service, mut vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::on_board_command(
-                &current_working_path,
-                &args.env,
-                &encryption_key_service,
-                &mut vault_service,
-            )
-        }
-        Cli::CreateEnv(args) => {
-            let (mut encryption_key_service, mut vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::create_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
-        }
-        Cli::RemoveEnv(args) => {
-            let (mut encryption_key_service, mut vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::remove_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
-        }
-        Cli::Set(args) => {
-            let (encryption_key_service, mut vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::set_command(
-                &args.env,
-                &args.key,
-                args.plaintext,
-                &encryption_key_service,
-                &mut vault_service,
-            )
-        }
-        Cli::Delete(args) => {
-            let (_, mut vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::delete_command(&args.env, &args.key, &mut vault_service)
-        }
-        Cli::List(args) => {
-            let (encryption_key_service, vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::list_command(
-                &args.env,
-                args.reveal,
-                &encryption_key_service,
-                &vault_service,
-            )
-        }
-        Cli::Validate(args) => {
-            let (encryption_key_service, vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::validate_command(args.env, &encryption_key_service, &vault_service)
-        }
-        Cli::Diff(args) => {
-            let (encryption_key_service, vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::diff_command(
-                &args.env1,
-                &args.env2,
-                args.reveal,
-                &encryption_key_service,
-                &vault_service,
-            )
-        }
-        Cli::Run(args) => {
-            let (encryption_key_service, vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::run_command(
-                &args.env,
-                &args.command,
-                &encryption_key_service,
-                &vault_service,
-            )
-        }
-        Cli::Rotate(args) => {
-            let (mut encryption_key_service, mut vault_service) =
-                initialize_services(&current_working_path).unwrap_or_else(|err| {
-                    error!("failed to initialize ramenv: {}", err);
-                    exit(1);
-                });
-
-            commands::rotate_command(&args.env, &mut encryption_key_service, &mut vault_service)
-        }
+        command => execute_runtime_command(command, &current_working_path),
     };
 
     if let Err(e) = result {
         error!("ramenv command failed with error:\n{:?}", e);
         exit(1);
+    }
+}
+
+fn execute_runtime_command(command: Cli, current_working_path: &Path) -> Result<()> {
+    let (mut encryption_key_service, mut vault_service) =
+        initialize_services(current_working_path)?;
+    match command {
+        Cli::Onboard(args) => commands::on_board_command(
+            current_working_path,
+            &args.env,
+            &encryption_key_service,
+            &mut vault_service,
+        ),
+        Cli::CreateEnv(args) => {
+            commands::create_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
+        }
+        Cli::RemoveEnv(args) => {
+            commands::remove_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
+        }
+        Cli::Set(args) => commands::set_command(
+            &args.env,
+            &args.key,
+            args.plaintext,
+            &encryption_key_service,
+            &mut vault_service,
+        ),
+        Cli::Delete(args) => commands::delete_command(&args.env, &args.key, &mut vault_service),
+        Cli::List(args) => commands::list_command(
+            &args.env,
+            args.reveal,
+            &encryption_key_service,
+            &vault_service,
+        ),
+        Cli::Validate(args) => {
+            commands::validate_command(args.env, &encryption_key_service, &vault_service)
+        }
+        Cli::Diff(args) => commands::diff_command(
+            &args.env1,
+            &args.env2,
+            args.reveal,
+            &encryption_key_service,
+            &vault_service,
+        ),
+        Cli::Run(args) => commands::run_command(
+            &args.env,
+            &args.command,
+            &encryption_key_service,
+            &vault_service,
+        ),
+        Cli::Rotate(args) => {
+            commands::rotate_command(&args.env, &mut encryption_key_service, &mut vault_service)
+        }
+        Cli::Menu | Cli::Init { .. } => unreachable!("handled before runtime services are loaded"),
     }
 }
 
@@ -296,9 +233,10 @@ fn initialize_services(
     impl services::EncryptionKeyService,
     impl services::VaultService,
 )> {
-    let workspace_registry = services::WorkspaceRegistry::new(current_working_path)?;
-    let encryption_key_service =
-        services::LocalEncryptionKeyService::new(&workspace_registry.get_workspace_root())?;
+    let workspace_registry = services::WorkspaceRegistry::load(current_working_path)?;
+    let encryption_key_service = services::KeyService::<services::LocalKeyStore>::load(
+        &workspace_registry.get_workspace_root(),
+    )?;
 
     if let Some(vault_path) = current_working_path
         .strip_prefix(workspace_registry.get_workspace_root())?
@@ -307,7 +245,7 @@ fn initialize_services(
     {
         let vault_signature_key = encryption_key_service.vault_signature_key(vault_path)?;
         let vault_registry =
-            services::VaultRegistry::new(current_working_path, vault_signature_key)?;
+            services::VaultRegistry::load(current_working_path, vault_signature_key)?;
 
         return Ok((encryption_key_service, vault_registry));
     }
