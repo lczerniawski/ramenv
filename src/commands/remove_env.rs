@@ -3,10 +3,11 @@ use log::info;
 
 use crate::services;
 
-pub fn remove_env_command(
+pub async fn remove_env_command(
     environment: &str,
     encryption_key_service: &mut impl services::EncryptionKeyService,
     vault_service: &mut impl services::VaultService,
+    workspace_service: &impl services::WorkspaceService,
 ) -> Result<()> {
     let old_key = encryption_key_service
         .env_key(environment)
@@ -18,7 +19,10 @@ pub fn remove_env_command(
 
     encryption_key_service.remove_env_key(environment);
     vault_service.remove_env_vault(environment);
-    if let Err(error) = encryption_key_service.commit() {
+    if let Err(error) = encryption_key_service
+        .commit(workspace_service.get_workspace_name())
+        .await
+    {
         encryption_key_service.set_env_key(environment, old_key);
         vault_service.set_env_vault(environment, old_vault);
         return Err(error);
@@ -27,7 +31,8 @@ pub fn remove_env_command(
         encryption_key_service.set_env_key(environment, old_key);
         vault_service.set_env_vault(environment, old_vault);
         encryption_key_service
-            .commit()
+            .commit(workspace_service.get_workspace_name())
+            .await
             .context("failed to roll back key after vault commit failure")?;
         return Err(error);
     }
@@ -41,40 +46,59 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::*;
-    use crate::commands::test_support::{Keys, Vault};
+    use crate::commands::test_support::{Keys, Vault, Workspace};
 
-    #[test]
-    fn removes_existing_environment_from_both_services() {
+    #[tokio::test]
+    async fn removes_existing_environment_from_both_services() {
         let mut keys = Keys::with_env("staging");
         let mut vault = Vault::with_env("staging", IndexMap::new());
-        remove_env_command("staging", &mut keys, &mut vault).unwrap();
+        let workspace = Workspace::default();
+
+        remove_env_command("staging", &mut keys, &mut vault, &workspace)
+            .await
+            .unwrap();
         assert!(!keys.values.contains_key("staging"));
         assert!(!vault.environments.contains_key("staging"));
         assert_eq!(keys.commits.get(), 1);
         assert_eq!(vault.commits.get(), 1);
     }
 
-    #[test]
-    fn rejects_missing_key_or_vault_before_committing() {
+    #[tokio::test]
+    async fn rejects_missing_key_or_vault_before_committing() {
         let mut keys = Keys::default();
         let mut vault = Vault::with_env("staging", IndexMap::new());
-        assert!(remove_env_command("staging", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            remove_env_command("staging", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
         assert_eq!(vault.commits.get(), 0);
 
         let mut keys = Keys::with_env("staging");
         let mut vault = Vault::default();
-        assert!(remove_env_command("staging", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            remove_env_command("staging", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
         assert_eq!(keys.commits.get(), 0);
     }
 
-    #[test]
-    fn propagates_commit_failures() {
+    #[tokio::test]
+    async fn propagates_commit_failures() {
         let mut keys = Keys {
             fail_commit: true,
             ..Keys::with_env("staging")
         };
         let mut vault = Vault::with_env("staging", IndexMap::new());
-        assert!(remove_env_command("staging", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            remove_env_command("staging", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
         assert_eq!(vault.commits.get(), 0);
         assert!(keys.values.contains_key("staging"));
         assert!(vault.environments.contains_key("staging"));
@@ -84,7 +108,12 @@ mod tests {
             fail_commit: true,
             ..Vault::with_env("staging", IndexMap::from([("KEY".into(), "value".into())]))
         };
-        assert!(remove_env_command("staging", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            remove_env_command("staging", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
         assert_eq!(keys.commits.get(), 2);
         assert!(keys.values.contains_key("staging"));
         assert_eq!(vault.environments["staging"]["KEY"], "value");

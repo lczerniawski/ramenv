@@ -1,9 +1,15 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Ok, Result};
+use azure_core::credentials::TokenCredential;
+use azure_security_keyvault_secrets::models::{SecretClientGetSecretOptions, SetSecretParameters};
+use azure_security_keyvault_secrets::{ResourceExt, SecretClient};
 use indexmap::IndexMap;
+use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::{crypto, models, validation::ValidationRule};
 
@@ -14,19 +20,41 @@ pub trait EncryptionKeyService {
     fn remove_env_key(&mut self, environment: &str);
     fn vault_signature_key(&self, vault: &str) -> Result<&str>;
     fn store_new_vault_signature_key(&mut self, vault: &str);
-    fn commit(&self) -> anyhow::Result<()>;
+    async fn commit(&mut self, workspace_name: &str) -> anyhow::Result<()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum KeyId {
+    Encryption(String),
+    Signature(String),
+}
+
+pub enum Change {
+    Upsert,
+    Remove,
 }
 
 pub trait KeyStore {
-    fn load(&self) -> Result<models::KeysFile>;
-    fn create(&self, keys: &models::KeysFile) -> Result<()>;
-    fn save(&self, keys: &models::KeysFile) -> Result<()>;
+    async fn load(&self) -> Result<models::KeysFile>;
+    async fn create(
+        &mut self,
+        keys: &models::KeysFile,
+        workspace_name: &str,
+        provider_url: Option<&str>,
+    ) -> Result<()>;
+    async fn save(
+        &mut self,
+        keys: &models::KeysFile,
+        workspace_name: &str,
+        pending: &IndexMap<KeyId, Change>,
+    ) -> Result<()>;
 }
 
 pub struct KeyService<S: KeyStore> {
     store: S,
     encryption_keys: IndexMap<String, String>,
     signature_keys: IndexMap<String, String>,
+    pending: IndexMap<KeyId, Change>,
 }
 
 impl<S: KeyStore> KeyService<S> {
@@ -35,15 +63,17 @@ impl<S: KeyStore> KeyService<S> {
             store,
             encryption_keys: IndexMap::new(),
             signature_keys: IndexMap::new(),
+            pending: IndexMap::new(),
         }
     }
 
-    pub fn from_store(store: S) -> Result<Self> {
-        let keys = store.load()?;
+    pub async fn from_store(store: S) -> Result<Self> {
+        let keys = store.load().await?;
         Ok(Self {
             store,
             encryption_keys: keys.encryption_keys,
             signature_keys: keys.signature_keys,
+            pending: IndexMap::new(),
         })
     }
 
@@ -54,8 +84,10 @@ impl<S: KeyStore> KeyService<S> {
         }
     }
 
-    pub fn create(&self) -> Result<()> {
-        self.store.create(&self.keys_file())
+    pub async fn create(&mut self, workspace_name: &str, provider_url: Option<&str>) -> Result<()> {
+        self.store
+            .create(&self.keys_file(), workspace_name, provider_url)
+            .await
     }
 }
 
@@ -74,15 +106,21 @@ impl<S: KeyStore> EncryptionKeyService for KeyService<S> {
 
     fn set_env_key(&mut self, environment: &str, key: String) {
         self.encryption_keys.insert(environment.to_string(), key);
+        self.pending
+            .insert(KeyId::Encryption(environment.to_string()), Change::Upsert);
     }
 
     fn store_new_env_key(&mut self, environment: &str) {
         self.encryption_keys
             .insert(environment.to_string(), crypto::generate_master_key_hex());
+        self.pending
+            .insert(KeyId::Encryption(environment.to_string()), Change::Upsert);
     }
 
     fn remove_env_key(&mut self, environment: &str) {
         self.encryption_keys.shift_remove(environment);
+        self.pending
+            .insert(KeyId::Encryption(environment.to_string()), Change::Remove);
     }
 
     fn vault_signature_key(&self, vault: &str) -> Result<&str> {
@@ -100,10 +138,14 @@ impl<S: KeyStore> EncryptionKeyService for KeyService<S> {
     fn store_new_vault_signature_key(&mut self, vault: &str) {
         self.signature_keys
             .insert(vault.to_string(), crypto::generate_signature_key_hex());
+        self.pending
+            .insert(KeyId::Signature(vault.to_string()), Change::Upsert);
     }
 
-    fn commit(&self) -> anyhow::Result<()> {
-        self.store.save(&self.keys_file())
+    async fn commit(&mut self, workspace_name: &str) -> anyhow::Result<()> {
+        self.store
+            .save(&self.keys_file(), workspace_name, &self.pending)
+            .await
     }
 }
 
@@ -135,7 +177,7 @@ fn write_file(path: &Path, content: &str, create: bool) -> Result<()> {
 }
 
 impl KeyStore for LocalKeyStore {
-    fn load(&self) -> Result<models::KeysFile> {
+    async fn load(&self) -> Result<models::KeysFile> {
         if !self.path.exists() {
             anyhow::bail!("keys file does not exist, please run `ramenv init` first");
         }
@@ -144,7 +186,12 @@ impl KeyStore for LocalKeyStore {
         toml::from_str(&content).context("failed to parse keys file")
     }
 
-    fn create(&self, keys: &models::KeysFile) -> Result<()> {
+    async fn create(
+        &mut self,
+        keys: &models::KeysFile,
+        _workspace_name: &str,
+        _provider_url: Option<&str>,
+    ) -> Result<()> {
         write_file(
             &self.path,
             &toml::to_string(keys).context("failed to serialize keys")?,
@@ -152,7 +199,12 @@ impl KeyStore for LocalKeyStore {
         )
     }
 
-    fn save(&self, keys: &models::KeysFile) -> Result<()> {
+    async fn save(
+        &mut self,
+        keys: &models::KeysFile,
+        _workspace_name: &str,
+        _pending: &IndexMap<KeyId, Change>,
+    ) -> Result<()> {
         write_file(
             &self.path,
             &toml::to_string(keys).context("failed to serialize keys")?,
@@ -161,28 +213,260 @@ impl KeyStore for LocalKeyStore {
     }
 }
 
-impl KeyService<LocalKeyStore> {
-    pub fn empty(workspace_root: &Path) -> Self {
-        Self::from_empty(LocalKeyStore::new(workspace_root))
+pub struct AzureKeyStore {
+    path: PathBuf,
+    credential: Arc<dyn TokenCredential>,
+}
+
+impl AzureKeyStore {
+    pub fn new(workspace_root: &Path, credential: Arc<dyn TokenCredential>) -> Self {
+        Self {
+            path: workspace_root.join(".ramenv.keyrefs.toml"),
+            credential,
+        }
     }
 
-    pub fn load(workspace_root: &Path) -> Result<Self> {
-        Self::from_store(LocalKeyStore::new(workspace_root))
+    async fn read_key(&self, secret_uri: &str) -> Result<String> {
+        let url = Url::parse(secret_uri)?;
+        if url.scheme() != "https" {
+            anyhow::bail!("Key Vault Secret reference must use HTTPS");
+        }
+
+        let parts = url
+            .path_segments()
+            .context("invalid key vault secret reference")?
+            .collect::<Vec<_>>();
+
+        let ["secrets", name, version] = parts.as_slice() else {
+            anyhow::bail!("invalid key vault secret reference");
+        };
+
+        let vault_url = format!("{}/", url.origin().ascii_serialization());
+        let client = SecretClient::new(&vault_url, self.credential.clone(), None)?;
+
+        let options = SecretClientGetSecretOptions {
+            secret_version: Some((*version).to_owned()),
+            ..Default::default()
+        };
+
+        let secret = client.get_secret(name, Some(options)).await?.into_model()?;
+
+        secret.value.context("Key Vault returned no secret value")
+    }
+
+    fn read_references(&self) -> Result<models::KeysReferenceFile> {
+        let content = std::fs::read_to_string(&self.path)
+            .with_context(|| format!("failed to read keys file {}", self.path.display()))?;
+        Ok(toml::from_str(&content)?)
+    }
+
+    fn write_references(&self, references: &models::KeysReferenceFile, create: bool) -> Result<()> {
+        write_file(
+            &self.path,
+            &toml::to_string(references).context("failed to serialize key references")?,
+            create,
+        )
+    }
+
+    fn secret_name(workspace_name: &str, kind: &str, key: &str) -> String {
+        let name = format!("ramenv-{workspace_name}-{kind}-{key}");
+        let allowed = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-';
+        if name.len() <= 127 && name.bytes().all(allowed) {
+            return name;
+        }
+
+        // Keep a readable ASCII prefix plus a digest of the original name so
+        // replacing path separators or truncating long names does not merge keys.
+        // 62 prefix bytes + one hyphen + 64 SHA-256 hex digits = 127 bytes.
+        let prefix: String = name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .take(62)
+            .collect();
+        let digest: String = Sha256::digest(name.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("{prefix}-{digest}")
+    }
+
+    fn encryption_key_name_format(&self, key: &str, workspace_name: &str) -> String {
+        Self::secret_name(workspace_name, "encryption", key)
+    }
+
+    fn signature_key_name_format(&self, key: &str, workspace_name: &str) -> String {
+        Self::secret_name(workspace_name, "signature", key)
     }
 }
 
-// Provider implementations only supply persistence; key operations remain in KeyService.
-pub struct AzureKeyStore;
-
 impl KeyStore for AzureKeyStore {
-    fn load(&self) -> Result<models::KeysFile> {
-        todo!()
+    async fn load(&self) -> Result<models::KeysFile> {
+        if !self.path.exists() {
+            anyhow::bail!("keys file does not exist, please run `ramenv init` first");
+        }
+        let reference_keys_file = self.read_references()?;
+
+        let mut keys = models::KeysFile {
+            encryption_keys: IndexMap::new(),
+            signature_keys: IndexMap::new(),
+        };
+
+        for (key, value) in reference_keys_file.encryption_keys.iter() {
+            let secret = self.read_key(value).await?;
+            keys.encryption_keys.insert(key.clone(), secret);
+        }
+        for (key, value) in reference_keys_file.signature_keys.iter() {
+            let secret = self.read_key(value).await?;
+            keys.signature_keys.insert(key.clone(), secret);
+        }
+
+        Ok(keys)
     }
-    fn create(&self, _keys: &models::KeysFile) -> Result<()> {
-        todo!()
+
+    async fn create(
+        &mut self,
+        keys: &models::KeysFile,
+        workspace_name: &str,
+        provider_url: Option<&str>,
+    ) -> Result<()> {
+        let provider_url = provider_url.expect("provider_url is required when creating keys");
+        let client = SecretClient::new(provider_url, self.credential.clone(), None)?;
+        let mut reference_keys_file = models::KeysReferenceFile::new(provider_url.to_string());
+
+        for (key, value) in keys.encryption_keys.iter() {
+            let secret_set_parameter = SetSecretParameters {
+                value: Some(value.into()),
+                ..Default::default()
+            };
+            let secret = client
+                .set_secret(
+                    &self.encryption_key_name_format(key, workspace_name),
+                    secret_set_parameter.try_into()?,
+                    None,
+                )
+                .await?
+                .into_model()?;
+
+            reference_keys_file
+                .encryption_keys
+                .insert(key.clone(), secret.resource_id()?.source_id);
+        }
+
+        for (key, value) in keys.signature_keys.iter() {
+            let secret_set_parameter = SetSecretParameters {
+                value: Some(value.into()),
+                ..Default::default()
+            };
+            let secret = client
+                .set_secret(
+                    &self.signature_key_name_format(key, workspace_name),
+                    secret_set_parameter.try_into()?,
+                    None,
+                )
+                .await?
+                .into_model()?;
+
+            reference_keys_file
+                .signature_keys
+                .insert(key.clone(), secret.resource_id()?.source_id);
+        }
+
+        self.write_references(&reference_keys_file, true)
     }
-    fn save(&self, _keys: &models::KeysFile) -> Result<()> {
-        todo!()
+
+    async fn save(
+        &mut self,
+        keys: &models::KeysFile,
+        workspace_name: &str,
+        pending: &IndexMap<KeyId, Change>,
+    ) -> Result<()> {
+        let mut reference_keys_file = self.read_references()?;
+        let client = SecretClient::new(
+            &reference_keys_file.provider_url,
+            self.credential.clone(),
+            None,
+        )?;
+
+        for (key_id, change) in pending {
+            match change {
+                Change::Upsert => match key_id {
+                    KeyId::Encryption(key) => {
+                        let encryption_key = keys
+                            .encryption_keys
+                            .get(key)
+                            .cloned()
+                            .expect("encryption key not found");
+                        let secret_set_parameter = SetSecretParameters {
+                            value: Some(encryption_key),
+                            ..Default::default()
+                        };
+                        let secret = client
+                            .set_secret(
+                                &self.encryption_key_name_format(key, workspace_name),
+                                secret_set_parameter.try_into()?,
+                                None,
+                            )
+                            .await?
+                            .into_model()?;
+
+                        reference_keys_file
+                            .encryption_keys
+                            .insert(key.clone(), secret.resource_id()?.source_id);
+                    }
+                    KeyId::Signature(key) => {
+                        let signature_key = keys
+                            .signature_keys
+                            .get(key)
+                            .cloned()
+                            .expect("encryption key not found");
+                        let secret_set_parameter = SetSecretParameters {
+                            value: Some(signature_key),
+                            ..Default::default()
+                        };
+                        let secret = client
+                            .set_secret(
+                                &self.signature_key_name_format(key, workspace_name),
+                                secret_set_parameter.try_into()?,
+                                None,
+                            )
+                            .await?
+                            .into_model()?;
+
+                        reference_keys_file
+                            .signature_keys
+                            .insert(key.clone(), secret.resource_id()?.source_id);
+                    }
+                },
+                Change::Remove => match key_id {
+                    KeyId::Encryption(key) => {
+                        client
+                            .delete_secret(
+                                &self.encryption_key_name_format(key, workspace_name),
+                                None,
+                            )
+                            .await?;
+                        reference_keys_file.encryption_keys.shift_remove(key);
+                    }
+                    KeyId::Signature(key) => {
+                        client
+                            .delete_secret(
+                                &self.signature_key_name_format(key, workspace_name),
+                                None,
+                            )
+                            .await?;
+                        reference_keys_file.signature_keys.shift_remove(key);
+                    }
+                },
+            }
+        }
+
+        self.write_references(&reference_keys_file, false)
     }
 }
 
@@ -325,14 +609,16 @@ impl VaultService for VaultRegistry {
 
 pub trait WorkspaceService {
     fn get_workspace_root(&self) -> PathBuf;
+    fn get_workspace_name(&self) -> &str;
+    fn get_provider(&self) -> models::Provider;
 }
 
 pub struct WorkspaceRegistry {
     workspace_root: PathBuf,
-    #[allow(dead_code)]
     workspace_name: String,
     #[allow(dead_code)]
     schema_version: String,
+    provider: models::Provider,
 }
 
 impl WorkspaceRegistry {
@@ -347,6 +633,7 @@ impl WorkspaceRegistry {
             workspace_root: workspace_root.to_path_buf(),
             workspace_name: workspace.workspace_name,
             schema_version: workspace.schema_version,
+            provider: workspace.ingredient,
         })
     }
 
@@ -358,6 +645,7 @@ impl WorkspaceRegistry {
             workspace_root,
             workspace_name: workspace.workspace_name,
             schema_version: workspace.schema_version,
+            provider: workspace.ingredient,
         })
     }
 
@@ -399,6 +687,14 @@ impl WorkspaceService for WorkspaceRegistry {
     fn get_workspace_root(&self) -> PathBuf {
         self.workspace_root.to_path_buf()
     }
+
+    fn get_workspace_name(&self) -> &str {
+        &self.workspace_name
+    }
+
+    fn get_provider(&self) -> models::Provider {
+        self.provider.clone()
+    }
 }
 
 #[cfg(test)]
@@ -436,12 +732,130 @@ mod tests {
         }
     }
 
+    fn azure_store(root: &Path) -> AzureKeyStore {
+        AzureKeyStore::new(
+            root,
+            azure_identity::DeveloperToolsCredential::new(None).unwrap(),
+        )
+    }
+
+    fn assert_azure_secret_name(name: &str) {
+        assert!((1..=127).contains(&name.len()), "invalid length: {name}");
+        assert!(
+            name.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+            "invalid characters: {name}"
+        );
+    }
+
+    #[test]
+    fn azure_secret_names_preserve_existing_valid_names() {
+        let store = azure_store(Path::new("."));
+        assert_eq!(
+            store.encryption_key_name_format("development", "my-project"),
+            "ramenv-my-project-encryption-development"
+        );
+        assert_eq!(
+            store.signature_key_name_format("api", "my-project"),
+            "ramenv-my-project-signature-api"
+        );
+    }
+
+    #[test]
+    fn azure_secret_names_support_underscores_paths_and_unicode() {
+        let store = azure_store(Path::new("."));
+        for workspace in ["azure_test", "my project", "项目"] {
+            for key in ["development", "preview_env", "/", "services/api", "服务/api"] {
+                assert_azure_secret_name(&store.encryption_key_name_format(key, workspace));
+                assert_azure_secret_name(&store.signature_key_name_format(key, workspace));
+            }
+        }
+    }
+
+    #[test]
+    fn azure_secret_names_are_stable_and_distinguish_normalized_inputs() {
+        let store = azure_store(Path::new("."));
+        let name = store.encryption_key_name_format("development", "azure_test");
+        assert_eq!(
+            name,
+            store.encryption_key_name_format("development", "azure_test")
+        );
+        assert_ne!(
+            name,
+            store.encryption_key_name_format("development", "azure-test")
+        );
+        assert_ne!(
+            store.signature_key_name_format("services/api", "test"),
+            store.signature_key_name_format("services-api", "test")
+        );
+        assert_ne!(
+            store.signature_key_name_format("services/api", "test"),
+            store.signature_key_name_format("services_api", "test")
+        );
+    }
+
+    #[test]
+    fn azure_secret_names_enforce_length_without_truncation_collisions() {
+        let store = azure_store(Path::new("."));
+        let workspace = "a".repeat(200);
+        let key = "b".repeat(200);
+        let name = store.encryption_key_name_format(&key, &workspace);
+        assert_azure_secret_name(&name);
+        assert_azure_secret_name(&store.signature_key_name_format(&key, &workspace));
+        assert_ne!(
+            name,
+            store.encryption_key_name_format(&format!("{key}c"), &workspace)
+        );
+        let boundary_workspace = "a".repeat(107);
+        let boundary = store.encryption_key_name_format("x", &boundary_workspace);
+        assert_eq!(boundary.len(), 127);
+        assert_eq!(boundary, format!("ramenv-{boundary_workspace}-encryption-x"));
+        assert_azure_secret_name(
+            &store.encryption_key_name_format("xx", &boundary_workspace),
+        );
+    }
+
+    #[test]
+    fn azure_references_create_then_update_preserves_urls_and_logical_names() {
+        let root = TempDir::new("azure-references");
+        let store = azure_store(&root.0);
+        let provider_url = "https://test.vault.azure.net/";
+        let encryption_uri = "https://test.vault.azure.net/secrets/env-key/version1";
+        let signature_uri = "https://test.vault.azure.net/secrets/signing-key/version2";
+        let mut references = models::KeysReferenceFile::new(provider_url.into());
+        references
+            .encryption_keys
+            .insert("preview_env".into(), encryption_uri.into());
+        store.write_references(&references, true).unwrap();
+        assert!(store.write_references(&references, true).is_err());
+
+        references
+            .signature_keys
+            .insert("/".into(), signature_uri.into());
+        store.write_references(&references, false).unwrap();
+        let reloaded = store.read_references().unwrap();
+        assert_eq!(reloaded.provider_url, provider_url);
+        assert_eq!(reloaded.encryption_keys["preview_env"], encryption_uri);
+        assert_eq!(reloaded.signature_keys["/"], signature_uri);
+
+        references.encryption_keys.shift_remove("preview_env");
+        store.write_references(&references, false).unwrap();
+        let reloaded = store.read_references().unwrap();
+        assert!(reloaded.encryption_keys.is_empty());
+        assert_eq!(reloaded.signature_keys["/"], signature_uri);
+    }
+
     fn write_keys(root: &Path) {
         let mut file = KeysFile::default();
         file.encryption_keys
             .insert("development".into(), ENV_KEY.into());
         file.signature_keys.insert("/".into(), SIGNING_KEY.into());
         std::fs::write(root.join(".ramenv.keys"), toml::to_string(&file).unwrap()).unwrap();
+    }
+
+    fn write_workspace(root: &Path) {
+        let workspace = WorkspaceFile::new("1".into(), "test".into(), Provider::Local);
+        WorkspaceRegistry::create(root, workspace).unwrap();
     }
 
     fn write_vault(root: &Path) {
@@ -470,11 +884,13 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn key_service_loads_mutates_and_persists_keys() {
+    #[tokio::test]
+    async fn key_service_loads_mutates_and_persists_keys() {
         let root = TempDir::new("keys");
         write_keys(&root.0);
-        let mut service = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut service = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         assert_eq!(service.env_key("development").unwrap(), ENV_KEY);
         assert_eq!(service.vault_signature_key("/").unwrap(), SIGNING_KEY);
 
@@ -482,9 +898,11 @@ mod tests {
         service.store_new_vault_signature_key("services/api");
         assert_eq!(service.env_key("production").unwrap().len(), 64);
         service.remove_env_key("development");
-        service.commit().unwrap();
+        service.commit("test").await.unwrap();
 
-        let reloaded = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let reloaded = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         assert!(reloaded.env_key("development").is_err());
         assert_eq!(reloaded.env_key("production").unwrap().len(), 64);
         assert_eq!(
@@ -493,15 +911,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_services_create_loadable_files_without_overwriting_them() {
+    #[tokio::test]
+    async fn empty_services_create_loadable_files_without_overwriting_them() {
         let root = TempDir::new("create-services");
-        let mut keys = KeyService::<LocalKeyStore>::empty(&root.0);
+        let mut keys = KeyService::from_empty(LocalKeyStore::new(&root.0));
         keys.store_new_env_key("development");
         keys.store_new_vault_signature_key("/");
-        keys.create().unwrap();
+        keys.create("test", None).await.unwrap();
         let key_content = std::fs::read_to_string(root.0.join(".ramenv.keys")).unwrap();
-        assert!(keys.create().is_err());
+        assert!(keys.create("test", None).await.is_err());
         assert_eq!(
             std::fs::read_to_string(root.0.join(".ramenv.keys")).unwrap(),
             key_content
@@ -526,39 +944,55 @@ mod tests {
         assert!(WorkspaceRegistry::create(&root.0, second).is_err());
     }
 
-    #[test]
-    fn key_service_reports_missing_and_malformed_files() {
+    #[tokio::test]
+    async fn key_service_reports_missing_and_malformed_files() {
         let root = TempDir::new("bad-keys");
-        assert!(KeyService::<LocalKeyStore>::load(&root.0).is_err());
+        assert!(
+            KeyService::from_store(LocalKeyStore::new(&root.0))
+                .await
+                .is_err()
+        );
 
         std::fs::create_dir(root.0.join(".ramenv.keys")).unwrap();
-        assert!(KeyService::<LocalKeyStore>::load(&root.0).is_err());
+        assert!(
+            KeyService::from_store(LocalKeyStore::new(&root.0))
+                .await
+                .is_err()
+        );
         std::fs::remove_dir(root.0.join(".ramenv.keys")).unwrap();
         std::fs::write(root.0.join(".ramenv.keys"), "not = [valid").unwrap();
-        assert!(KeyService::<LocalKeyStore>::load(&root.0).is_err());
+        assert!(
+            KeyService::from_store(LocalKeyStore::new(&root.0))
+                .await
+                .is_err()
+        );
     }
 
-    #[test]
-    fn key_service_commit_fails_if_backing_file_was_removed() {
+    #[tokio::test]
+    async fn key_service_commit_fails_if_backing_file_was_removed() {
         let root = TempDir::new("removed-keys");
         write_keys(&root.0);
-        let service = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut service = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         std::fs::remove_file(root.0.join(".ramenv.keys")).unwrap();
-        assert!(service.commit().is_err());
+        assert!(service.commit("test").await.is_err());
     }
 
-    #[test]
-    fn key_service_commit_reports_an_unwritable_backing_path() {
+    #[tokio::test]
+    async fn key_service_commit_reports_an_unwritable_backing_path() {
         let root = TempDir::new("unwritable-keys");
         write_keys(&root.0);
-        let service = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut service = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         std::fs::remove_file(root.0.join(".ramenv.keys")).unwrap();
         std::fs::create_dir(root.0.join(".ramenv.keys")).unwrap();
-        assert!(service.commit().is_err());
+        assert!(service.commit("test").await.is_err());
     }
 
-    #[test]
-    fn vault_registry_verifies_and_persists_all_mutations() {
+    #[tokio::test]
+    async fn vault_registry_verifies_and_persists_all_mutations() {
         let root = TempDir::new("vault");
         write_vault(&root.0);
         let mut registry = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
@@ -673,20 +1107,30 @@ mod tests {
         assert!(WorkspaceRegistry::load(&root.0).is_err());
     }
 
-    #[test]
-    fn create_environment_rolls_back_persisted_key_when_vault_write_fails() {
+    #[tokio::test]
+    async fn create_environment_rolls_back_persisted_key_when_vault_write_fails() {
         let root = TempDir::new("create-rollback");
+        write_workspace(&root.0);
         write_keys(&root.0);
         write_vault(&root.0);
         let vault_path = root.0.join(".ramenv.vault.toml");
         let original_vault = std::fs::read_to_string(&vault_path).unwrap();
-        let mut keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut keys = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         let mut vault = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
+        let workspace = WorkspaceRegistry::load(&root.0).unwrap();
         std::fs::remove_file(&vault_path).unwrap();
         std::fs::create_dir(&vault_path).unwrap();
 
-        assert!(crate::commands::create_env_command("staging", &mut keys, &mut vault).is_err());
-        let persisted_keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        assert!(
+            crate::commands::create_env_command("staging", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
+        let persisted_keys = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         assert!(persisted_keys.env_key("staging").is_err());
         assert!(vault.env_vault("staging").is_err());
 
@@ -694,20 +1138,30 @@ mod tests {
         std::fs::write(&vault_path, original_vault).unwrap();
     }
 
-    #[test]
-    fn remove_environment_restores_persisted_key_when_vault_write_fails() {
+    #[tokio::test]
+    async fn remove_environment_restores_persisted_key_when_vault_write_fails() {
         let root = TempDir::new("remove-rollback");
+        write_workspace(&root.0);
         write_keys(&root.0);
         write_vault(&root.0);
         let vault_path = root.0.join(".ramenv.vault.toml");
         let original_vault = std::fs::read_to_string(&vault_path).unwrap();
-        let mut keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut keys = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         let mut vault = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
+        let workspace = WorkspaceRegistry::load(&root.0).unwrap();
         std::fs::remove_file(&vault_path).unwrap();
         std::fs::create_dir(&vault_path).unwrap();
 
-        assert!(crate::commands::remove_env_command("development", &mut keys, &mut vault).is_err());
-        let persisted_keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        assert!(
+            crate::commands::remove_env_command("development", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
+        let persisted_keys = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         assert_eq!(persisted_keys.env_key("development").unwrap(), ENV_KEY);
         assert!(vault.env_vault("development").is_ok());
 
@@ -715,19 +1169,28 @@ mod tests {
         std::fs::write(&vault_path, original_vault).unwrap();
     }
 
-    #[test]
-    fn rotate_restores_persisted_vault_when_key_write_fails() {
+    #[tokio::test]
+    async fn rotate_restores_persisted_vault_when_key_write_fails() {
         let root = TempDir::new("rotate-rollback");
+        write_workspace(&root.0);
         write_keys(&root.0);
         write_vault(&root.0);
         let keys_path = root.0.join(".ramenv.keys");
         let original_keys = std::fs::read_to_string(&keys_path).unwrap();
-        let mut keys = KeyService::<LocalKeyStore>::load(&root.0).unwrap();
+        let mut keys = KeyService::from_store(LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
         let mut vault = VaultRegistry::load(&root.0, SIGNING_KEY).unwrap();
+        let workspace = WorkspaceRegistry::load(&root.0).unwrap();
+
         std::fs::remove_file(&keys_path).unwrap();
         std::fs::create_dir(&keys_path).unwrap();
 
-        assert!(crate::commands::rotate_command("development", &mut keys, &mut vault).is_err());
+        assert!(
+            crate::commands::rotate_command("development", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
         std::fs::remove_dir(&keys_path).unwrap();
         std::fs::write(&keys_path, original_keys).unwrap();
 

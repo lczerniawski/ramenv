@@ -26,14 +26,48 @@ pub use validate::validate_command;
 
 #[cfg(test)]
 pub(super) mod test_support {
-    use std::cell::Cell;
+    use std::{cell::Cell, path::PathBuf};
 
     use anyhow::Result;
     use indexmap::IndexMap;
 
-    use crate::{services, validation::ValidationRule};
+    use crate::{models, services, validation::ValidationRule};
 
     pub const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    pub struct Workspace {
+        pub root: PathBuf,
+        pub name: String,
+    }
+
+    impl Workspace {
+        pub fn new(root: impl Into<PathBuf>, name: impl Into<String>) -> Self {
+            Self {
+                root: root.into(),
+                name: name.into(),
+            }
+        }
+    }
+
+    impl Default for Workspace {
+        fn default() -> Self {
+            Self::new(".", "test")
+        }
+    }
+
+    impl services::WorkspaceService for Workspace {
+        fn get_workspace_root(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn get_workspace_name(&self) -> &str {
+            &self.name
+        }
+
+        fn get_provider(&self) -> models::Provider {
+            models::Provider::Local
+        }
+    }
 
     #[derive(Default)]
     pub struct Keys {
@@ -85,7 +119,7 @@ pub(super) mod test_support {
                 .insert(vault.into(), crate::crypto::generate_signature_key_hex());
         }
 
-        fn commit(&self) -> Result<()> {
+        async fn commit(&mut self, _workspace_name: &str) -> Result<()> {
             self.commits.set(self.commits.get() + 1);
             if self.fail_commit {
                 anyhow::bail!("key commit failed");

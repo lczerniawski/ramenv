@@ -20,6 +20,23 @@ impl Default for KeysFile {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct KeysReferenceFile {
+    pub encryption_keys: IndexMap<String, String>,
+    pub signature_keys: IndexMap<String, String>,
+    pub provider_url: String,
+}
+
+impl KeysReferenceFile {
+    pub fn new(provider_url: String) -> Self {
+        Self {
+            encryption_keys: IndexMap::new(),
+            signature_keys: IndexMap::new(),
+            provider_url,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VaultFile {
     pub validation: IndexMap<String, ValidationRule>,
     pub environments: IndexMap<String, IndexMap<String, String>>,
@@ -75,13 +92,13 @@ impl WorkspaceFile {
     }
 }
 
-#[derive(Clone, Debug, ValueEnum, Serialize, Deserialize)]
+#[derive(Clone, Debug, ValueEnum, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Local,
     Azure,
-    Google,
-    Aws,
+    // Google,
+    // Aws,
 }
 
 #[cfg(test)]

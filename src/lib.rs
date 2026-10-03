@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::process::exit;
 
-use anyhow::Ok;
 use anyhow::Result;
+use azure_identity::DeveloperToolsCredential;
 use clap::{Args, Parser, Subcommand};
 use env_logger::Env;
 use log::error;
@@ -150,7 +150,7 @@ struct RotateArgs {
     env: String,
 }
 
-pub fn run_cli() {
+pub async fn run_cli() {
     let env = Env::default().filter_or("RUST_LOG", "info");
     env_logger::init_from_env(env);
 
@@ -163,9 +163,9 @@ pub fn run_cli() {
     let result = match cli {
         Cli::Menu => commands::menu_command(),
         Cli::Init { target, ingredient } => {
-            commands::init_command(&current_working_path, target, ingredient)
+            commands::init_command(&current_working_path, target, ingredient).await
         }
-        command => execute_runtime_command(command, &current_working_path),
+        command => execute_runtime_command(command, &current_working_path).await,
     };
 
     if let Err(e) = result {
@@ -174,83 +174,102 @@ pub fn run_cli() {
     }
 }
 
-fn execute_runtime_command(command: Cli, current_working_path: &Path) -> Result<()> {
-    let (mut encryption_key_service, mut vault_service) =
-        initialize_services(current_working_path)?;
+async fn execute_runtime_command(command: Cli, current_working_path: &Path) -> Result<()> {
+    let workspace_registry = services::WorkspaceRegistry::load(current_working_path)?;
+    let root = workspace_registry.get_workspace_root();
+
+    match workspace_registry.get_provider() {
+        models::Provider::Local => {
+            let store = services::LocalKeyStore::new(&root);
+            execute_with_store(command, current_working_path, workspace_registry, store).await
+        }
+        models::Provider::Azure => {
+            let credential = DeveloperToolsCredential::new(None)?;
+            let store = services::AzureKeyStore::new(&root, credential);
+            execute_with_store(command, current_working_path, workspace_registry, store).await
+        }
+    }
+}
+
+async fn execute_with_store<S: services::KeyStore>(
+    command: Cli,
+    current_working_path: &Path,
+    workspace_registry: services::WorkspaceRegistry,
+    store: S,
+) -> Result<()> {
+    let mut key_service = services::KeyService::from_store(store).await?;
+    let root = workspace_registry.get_workspace_root();
+    let vault_path = current_working_path
+        .strip_prefix(&root)?
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid vault path"))?;
+    let vault_path = if vault_path.is_empty() {
+        "/"
+    } else {
+        vault_path
+    };
+    let vault_signature_key = key_service.vault_signature_key(vault_path)?;
+    let mut vault_registry =
+        services::VaultRegistry::load(current_working_path, vault_signature_key)?;
+
     match command {
         Cli::Onboard(args) => commands::on_board_command(
             current_working_path,
             &args.env,
-            &encryption_key_service,
-            &mut vault_service,
+            &key_service,
+            &mut vault_registry,
         ),
         Cli::CreateEnv(args) => {
-            commands::create_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
+            commands::create_env_command(
+                &args.env,
+                &mut key_service,
+                &mut vault_registry,
+                &workspace_registry,
+            )
+            .await
         }
         Cli::RemoveEnv(args) => {
-            commands::remove_env_command(&args.env, &mut encryption_key_service, &mut vault_service)
+            commands::remove_env_command(
+                &args.env,
+                &mut key_service,
+                &mut vault_registry,
+                &workspace_registry,
+            )
+            .await
         }
         Cli::Set(args) => commands::set_command(
             &args.env,
             &args.key,
             args.plaintext,
-            &encryption_key_service,
-            &mut vault_service,
+            &key_service,
+            &mut vault_registry,
         ),
-        Cli::Delete(args) => commands::delete_command(&args.env, &args.key, &mut vault_service),
-        Cli::List(args) => commands::list_command(
-            &args.env,
-            args.reveal,
-            &encryption_key_service,
-            &vault_service,
-        ),
-        Cli::Validate(args) => {
-            commands::validate_command(args.env, &encryption_key_service, &vault_service)
+        Cli::Delete(args) => commands::delete_command(&args.env, &args.key, &mut vault_registry),
+        Cli::List(args) => {
+            commands::list_command(&args.env, args.reveal, &key_service, &vault_registry)
         }
+        Cli::Validate(args) => commands::validate_command(args.env, &key_service, &vault_registry),
         Cli::Diff(args) => commands::diff_command(
             &args.env1,
             &args.env2,
             args.reveal,
-            &encryption_key_service,
-            &vault_service,
+            &key_service,
+            &vault_registry,
         ),
-        Cli::Run(args) => commands::run_command(
-            &args.env,
-            &args.command,
-            &encryption_key_service,
-            &vault_service,
-        ),
+        Cli::Run(args) => {
+            commands::run_command(&args.env, &args.command, &key_service, &vault_registry)
+        }
         Cli::Rotate(args) => {
-            commands::rotate_command(&args.env, &mut encryption_key_service, &mut vault_service)
+            commands::rotate_command(
+                &args.env,
+                &mut key_service,
+                &mut vault_registry,
+                &workspace_registry,
+            )
+            .await
         }
         Cli::Menu | Cli::Init { .. } => unreachable!("handled before runtime services are loaded"),
     }
-}
-
-fn initialize_services(
-    current_working_path: &Path,
-) -> Result<(
-    impl services::EncryptionKeyService,
-    impl services::VaultService,
-)> {
-    let workspace_registry = services::WorkspaceRegistry::load(current_working_path)?;
-    let encryption_key_service = services::KeyService::<services::LocalKeyStore>::load(
-        &workspace_registry.get_workspace_root(),
-    )?;
-
-    if let Some(vault_path) = current_working_path
-        .strip_prefix(workspace_registry.get_workspace_root())?
-        .to_str()
-        .map(|s| if s.is_empty() { "/" } else { s })
-    {
-        let vault_signature_key = encryption_key_service.vault_signature_key(vault_path)?;
-        let vault_registry =
-            services::VaultRegistry::load(current_working_path, vault_signature_key)?;
-
-        return Ok((encryption_key_service, vault_registry));
-    }
-
-    anyhow::bail!("failed to initialize vault registry");
 }
 
 #[cfg(test)]
@@ -283,35 +302,84 @@ mod tests {
         }
     }
 
-    #[test]
-    fn initializes_services_for_single_repository() {
+    #[tokio::test]
+    async fn executes_runtime_command_for_single_repository() {
         let root = TempDir::new();
-        commands::init_command(&root.0, None, None).unwrap();
-        let (keys, vault) = initialize_services(&root.0).unwrap();
+        commands::init_command(&root.0, None, None).await.unwrap();
+
+        execute_runtime_command(
+            Cli::List(ListArgs {
+                env: "development".into(),
+                reveal: false,
+            }),
+            &root.0,
+        )
+        .await
+        .unwrap();
+
+        let workspace = services::WorkspaceRegistry::load(&root.0).unwrap();
+        let keys = services::KeyService::from_store(services::LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
+        let vault =
+            services::VaultRegistry::load(&root.0, keys.vault_signature_key("/").unwrap()).unwrap();
         assert_eq!(keys.env_key("development").unwrap().len(), 64);
         assert!(vault.env_vault("development").is_ok());
+        assert!(workspace.get_workspace_root().is_absolute());
     }
 
-    #[test]
-    fn initializes_services_for_nested_monorepo_vault() {
+    #[tokio::test]
+    async fn executes_runtime_command_for_nested_monorepo_vault() {
         let root = TempDir::new();
         commands::init_command(
             &root.0,
             Some(InitTarget::Workspace { ingredient: None }),
             None,
         )
+        .await
         .unwrap();
         let service = root.0.join("services/api");
         std::fs::create_dir_all(&service).unwrap();
-        commands::init_command(&service, Some(InitTarget::Service), None).unwrap();
-        let (keys, vault) = initialize_services(&service).unwrap();
-        assert!(keys.vault_signature_key("services/api").is_ok());
+        commands::init_command(&service, Some(InitTarget::Service), None)
+            .await
+            .unwrap();
+
+        execute_runtime_command(
+            Cli::List(ListArgs {
+                env: "production".into(),
+                reveal: false,
+            }),
+            &service,
+        )
+        .await
+        .unwrap();
+
+        let workspace = services::WorkspaceRegistry::load(&service).unwrap();
+        let keys = services::KeyService::from_store(services::LocalKeyStore::new(&root.0))
+            .await
+            .unwrap();
+        let vault = services::VaultRegistry::load(
+            &service,
+            keys.vault_signature_key("services/api").unwrap(),
+        )
+        .unwrap();
         assert!(vault.env_vault("production").is_ok());
+        assert!(workspace.get_workspace_root().is_absolute());
     }
 
-    #[test]
-    fn service_initialization_rejects_missing_workspace() {
+    #[tokio::test]
+    async fn runtime_command_rejects_missing_workspace() {
         let root = TempDir::new();
-        assert!(initialize_services(&root.0).is_err());
+        assert!(
+            execute_runtime_command(
+                Cli::List(ListArgs {
+                    env: "development".into(),
+                    reveal: false,
+                }),
+                &root.0,
+            )
+            .await
+            .is_err()
+        );
     }
 }

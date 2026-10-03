@@ -7,10 +7,11 @@ use crate::{
     utils::{self, StringExt},
 };
 
-pub fn rotate_command(
+pub async fn rotate_command(
     env: &str,
     encryption_key_service: &mut impl services::EncryptionKeyService,
     vault_registry: &mut impl services::VaultService,
+    workspace_service: &impl services::WorkspaceService,
 ) -> Result<()> {
     let encryption_key = encryption_key_service.env_key(env)?.to_owned();
     let vault = vault_registry.env_vault(env)?;
@@ -36,7 +37,10 @@ pub fn rotate_command(
         encryption_key_service.set_env_key(env, encryption_key);
         return Err(error);
     }
-    if let Err(error) = encryption_key_service.commit() {
+    if let Err(error) = encryption_key_service
+        .commit(workspace_service.get_workspace_name())
+        .await
+    {
         vault_registry.set_env_vault(env, vault);
         encryption_key_service.set_env_key(env, encryption_key);
         vault_registry
@@ -57,10 +61,10 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::*;
-    use crate::commands::test_support::{KEY, Keys, Vault};
+    use crate::commands::test_support::{KEY, Keys, Vault, Workspace};
 
-    #[test]
-    fn rotates_only_encrypted_values_and_commits() {
+    #[tokio::test]
+    async fn rotates_only_encrypted_values_and_commits() {
         let encrypted = crypto::encrypt_value("secret value", KEY).unwrap();
         let mut keys = Keys::with_env("dev");
         let mut vault = Vault::with_env(
@@ -70,7 +74,10 @@ mod tests {
                 ("PLAIN".into(), "plain value".into()),
             ]),
         );
-        rotate_command("dev", &mut keys, &mut vault).unwrap();
+        let workspace = Workspace::default();
+        rotate_command("dev", &mut keys, &mut vault, &workspace)
+            .await
+            .unwrap();
         let new_key = &keys.values["dev"];
         assert_ne!(new_key, KEY);
         assert_ne!(vault.environments["dev"]["SECRET"], encrypted);
@@ -83,40 +90,60 @@ mod tests {
         assert_eq!(keys.commits.get(), 1);
     }
 
-    #[test]
-    fn rejects_missing_state_or_corrupt_ciphertext() {
+    #[tokio::test]
+    async fn rejects_missing_state_or_corrupt_ciphertext() {
         let mut keys = Keys::default();
         let mut vault = Vault::with_env("dev", IndexMap::new());
-        assert!(rotate_command("dev", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            rotate_command("dev", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
 
         let mut keys = Keys::with_env("dev");
         let mut vault = Vault::default();
-        assert!(rotate_command("dev", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            rotate_command("dev", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
 
         let mut keys = Keys::with_env("dev");
         let mut vault = Vault::with_env(
             "dev",
             IndexMap::from([("SECRET".into(), "secret:invalid".into())]),
         );
-        assert!(rotate_command("dev", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            rotate_command("dev", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
         assert_eq!(vault.commits.get(), 0);
     }
 
-    #[test]
-    fn propagates_vault_commit_failure_without_committing_keys() {
+    #[tokio::test]
+    async fn propagates_vault_commit_failure_without_committing_keys() {
         let mut keys = Keys::with_env("dev");
         let mut vault = Vault {
             fail_commit: true,
             ..Vault::with_env("dev", IndexMap::new())
         };
-        assert!(rotate_command("dev", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            rotate_command("dev", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
         assert_eq!(keys.commits.get(), 0);
         assert_eq!(keys.values["dev"], KEY);
         assert!(vault.environments["dev"].is_empty());
     }
 
-    #[test]
-    fn rolls_back_vault_when_key_commit_fails() {
+    #[tokio::test]
+    async fn rolls_back_vault_when_key_commit_fails() {
         let encrypted = crypto::encrypt_value("secret value", KEY).unwrap();
         let mut keys = Keys {
             fail_commit: true,
@@ -126,7 +153,12 @@ mod tests {
             "dev",
             IndexMap::from([("SECRET".into(), encrypted.clone())]),
         );
-        assert!(rotate_command("dev", &mut keys, &mut vault).is_err());
+        let workspace = Workspace::default();
+        assert!(
+            rotate_command("dev", &mut keys, &mut vault, &workspace)
+                .await
+                .is_err()
+        );
         assert_eq!(keys.values["dev"], KEY);
         assert_eq!(vault.environments["dev"]["SECRET"], encrypted);
         assert_eq!(vault.commits.get(), 2);
