@@ -1,5 +1,4 @@
 use anyhow::{Context, Ok, Result};
-use azure_identity::DeveloperToolsCredential;
 use indexmap::IndexMap;
 use inquire::Text;
 use log::info;
@@ -150,7 +149,7 @@ async fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
                 .await?;
             }
             Provider::Azure => {
-                let credential = DeveloperToolsCredential::new(None)?;
+                let credential = crate::azure_auth::azure_credential().await?;
                 let store = services::AzureKeyStore::new(current_working_path, credential);
                 create_keys(
                     store,
@@ -197,7 +196,7 @@ async fn init_vault_file(
             create_vault(current_working_path, workspace_registry, vault_name, store).await?;
         }
         Provider::Azure => {
-            let credential = DeveloperToolsCredential::new(None)?;
+            let credential = crate::azure_auth::azure_credential().await?;
             let store = services::AzureKeyStore::new(&workspace_root, credential);
             create_vault(current_working_path, workspace_registry, vault_name, store).await?;
         }

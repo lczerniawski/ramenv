@@ -2,7 +2,6 @@ use std::path::Path;
 use std::process::exit;
 
 use anyhow::Result;
-use azure_identity::DeveloperToolsCredential;
 use clap::{Args, Parser, Subcommand};
 use env_logger::Env;
 use log::error;
@@ -11,6 +10,7 @@ use services::WorkspaceService;
 use crate::models::Provider;
 use crate::services::EncryptionKeyService;
 
+mod azure_auth;
 mod commands;
 pub mod crypto;
 pub mod models;
@@ -184,7 +184,7 @@ async fn execute_runtime_command(command: Cli, current_working_path: &Path) -> R
             execute_with_store(command, current_working_path, workspace_registry, store).await
         }
         models::Provider::Azure => {
-            let credential = DeveloperToolsCredential::new(None)?;
+            let credential = azure_auth::azure_credential().await?;
             let store = services::AzureKeyStore::new(&root, credential);
             execute_with_store(command, current_working_path, workspace_registry, store).await
         }
