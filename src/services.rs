@@ -197,6 +197,24 @@ fn secret_name(workspace_name: &str, kind: &str, key: &str) -> String {
     format!("{prefix}-{digest}")
 }
 
+fn read_references(path: &Path) -> Result<models::KeysReferenceFile> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read keys file {}", path.display()))?;
+    toml::from_str(&content).context("failed to parse key references")
+}
+
+fn write_references(
+    path: &Path,
+    references: &models::KeysReferenceFile,
+    create: bool,
+) -> Result<()> {
+    write_file(
+        path,
+        &toml::to_string(references).context("failed to serialize key references")?,
+        create,
+    )
+}
+
 fn write_file(path: &Path, content: &str, create: bool) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true);
@@ -289,20 +307,6 @@ impl AzureKeyStore {
 
         secret.value.context("Key Vault returned no secret value")
     }
-
-    fn read_references(&self) -> Result<models::KeysReferenceFile> {
-        let content = std::fs::read_to_string(&self.path)
-            .with_context(|| format!("failed to read keys file {}", self.path.display()))?;
-        Ok(toml::from_str(&content)?)
-    }
-
-    fn write_references(&self, references: &models::KeysReferenceFile, create: bool) -> Result<()> {
-        write_file(
-            &self.path,
-            &toml::to_string(references).context("failed to serialize key references")?,
-            create,
-        )
-    }
 }
 
 impl KeyStore for AzureKeyStore {
@@ -310,7 +314,7 @@ impl KeyStore for AzureKeyStore {
         if !self.path.exists() {
             anyhow::bail!("keys file does not exist, please run `ramenv init` first");
         }
-        let reference_keys_file = self.read_references()?;
+        let reference_keys_file = read_references(&self.path)?;
 
         let mut keys = models::KeysFile {
             encryption_keys: IndexMap::new(),
@@ -378,7 +382,7 @@ impl KeyStore for AzureKeyStore {
                 .insert(key.clone(), secret.resource_id()?.source_id);
         }
 
-        self.write_references(&reference_keys_file, true)
+        write_references(&self.path, &reference_keys_file, true)
     }
 
     async fn save(
@@ -387,81 +391,54 @@ impl KeyStore for AzureKeyStore {
         workspace_name: &str,
         pending: &IndexMap<KeyId, Change>,
     ) -> Result<()> {
-        let mut reference_keys_file = self.read_references()?;
-        let client = SecretClient::new(
-            &reference_keys_file.provider_location,
-            self.credential.clone(),
-            None,
-        )?;
+        let mut references = read_references(&self.path)?;
+        let client =
+            SecretClient::new(&references.provider_location, self.credential.clone(), None)?;
 
-        for (key_id, change) in pending {
+        for (id, change) in pending {
+            let (key, kind, values, refs) = match id {
+                KeyId::Encryption(key) => (
+                    key,
+                    "encryption",
+                    &keys.encryption_keys,
+                    &mut references.encryption_keys,
+                ),
+                KeyId::Signature(key) => (
+                    key,
+                    "signature",
+                    &keys.signature_keys,
+                    &mut references.signature_keys,
+                ),
+            };
             match change {
-                Change::Upsert => match key_id {
-                    KeyId::Encryption(key) => {
-                        let encryption_key = keys
-                            .encryption_keys
-                            .get(key)
-                            .cloned()
-                            .expect("encryption key not found");
-                        let secret_set_parameter = SetSecretParameters {
-                            value: Some(encryption_key),
-                            ..Default::default()
-                        };
-                        let secret = client
-                            .set_secret(
-                                &secret_name(workspace_name, "encryption", key),
-                                secret_set_parameter.try_into()?,
-                                None,
-                            )
-                            .await?
-                            .into_model()?;
-
-                        reference_keys_file
-                            .encryption_keys
-                            .insert(key.clone(), secret.resource_id()?.source_id);
-                    }
-                    KeyId::Signature(key) => {
-                        let signature_key = keys
-                            .signature_keys
-                            .get(key)
-                            .cloned()
-                            .expect("signature key not found");
-                        let secret_set_parameter = SetSecretParameters {
-                            value: Some(signature_key),
-                            ..Default::default()
-                        };
-                        let secret = client
-                            .set_secret(
-                                &secret_name(workspace_name, "signature", key),
-                                secret_set_parameter.try_into()?,
-                                None,
-                            )
-                            .await?
-                            .into_model()?;
-
-                        reference_keys_file
-                            .signature_keys
-                            .insert(key.clone(), secret.resource_id()?.source_id);
-                    }
-                },
-                Change::Remove => match key_id {
-                    KeyId::Encryption(key) => {
-                        client
-                            .delete_secret(&secret_name(workspace_name, "encryption", key), None)
-                            .await?;
-                        reference_keys_file.encryption_keys.shift_remove(key);
-                    }
-                    KeyId::Signature(key) => {
-                        client
-                            .delete_secret(&secret_name(workspace_name, "signature", key), None)
-                            .await?;
-                        reference_keys_file.signature_keys.shift_remove(key);
-                    }
-                },
+                Change::Upsert => {
+                    let value = values
+                        .get(key)
+                        .with_context(|| format!("{kind} key not found for {key}"))?;
+                    let parameters = SetSecretParameters {
+                        value: Some(value.clone()),
+                        ..Default::default()
+                    };
+                    let secret = client
+                        .set_secret(
+                            &secret_name(workspace_name, kind, key),
+                            parameters.try_into()?,
+                            None,
+                        )
+                        .await?
+                        .into_model()?;
+                    refs.insert(key.clone(), secret.resource_id()?.source_id);
+                }
+                Change::Remove => {
+                    client
+                        .delete_secret(&secret_name(workspace_name, kind, key), None)
+                        .await?;
+                    refs.shift_remove(key);
+                }
             }
         }
 
-        self.write_references(&reference_keys_file, false)
+        write_references(&self.path, &references, false)
     }
 }
 
@@ -593,20 +570,6 @@ impl AwsKeyStore {
             Err(error) => Err(error).context("failed to delete AWS Secrets Manager secret"),
         }
     }
-
-    fn read_references(&self) -> Result<models::KeysReferenceFile> {
-        let content = std::fs::read_to_string(&self.path)
-            .with_context(|| format!("failed to read keys file {}", self.path.display()))?;
-        toml::from_str(&content).context("failed to parse key references")
-    }
-
-    fn write_references(&self, references: &models::KeysReferenceFile, create: bool) -> Result<()> {
-        write_file(
-            &self.path,
-            &toml::to_string(references).context("failed to serialize key references")?,
-            create,
-        )
-    }
 }
 
 impl KeyStore for AwsKeyStore {
@@ -614,7 +577,7 @@ impl KeyStore for AwsKeyStore {
         if !self.path.exists() {
             anyhow::bail!("keys file does not exist, please run `ramenv init` first");
         }
-        let references = self.read_references()?;
+        let references = read_references(&self.path)?;
         let region = Self::region(&references.provider_location)?;
         let mut keys = models::KeysFile::default();
         for (key, reference) in &references.encryption_keys {
@@ -660,7 +623,7 @@ impl KeyStore for AwsKeyStore {
                 .await?;
             references.signature_keys.insert(key.clone(), reference);
         }
-        self.write_references(&references, true)
+        write_references(&self.path, &references, true)
     }
 
     async fn save(
@@ -669,7 +632,7 @@ impl KeyStore for AwsKeyStore {
         workspace_name: &str,
         pending: &IndexMap<KeyId, Change>,
     ) -> Result<()> {
-        let mut references = self.read_references()?;
+        let mut references = read_references(&self.path)?;
         let region = Self::region(&references.provider_location)?.to_string();
         for (id, change) in pending {
             let (key, kind, values, refs) = match id {
@@ -704,7 +667,7 @@ impl KeyStore for AwsKeyStore {
                 }
             }
         }
-        self.write_references(&references, false)
+        write_references(&self.path, &references, false)
     }
 }
 
@@ -823,20 +786,6 @@ impl GoogleKeyStore {
             Err(error) => Err(error).context("failed to delete Google Secret Manager secret"),
         }
     }
-
-    fn read_references(&self) -> Result<models::KeysReferenceFile> {
-        let content = std::fs::read_to_string(&self.path)
-            .with_context(|| format!("failed to read keys file {}", self.path.display()))?;
-        toml::from_str(&content).context("failed to parse key references")
-    }
-
-    fn write_references(&self, references: &models::KeysReferenceFile, create: bool) -> Result<()> {
-        write_file(
-            &self.path,
-            &toml::to_string(references).context("failed to serialize key references")?,
-            create,
-        )
-    }
 }
 
 impl KeyStore for GoogleKeyStore {
@@ -844,7 +793,7 @@ impl KeyStore for GoogleKeyStore {
         if !self.path.exists() {
             anyhow::bail!("keys file does not exist, please run `ramenv init` first");
         }
-        let references = self.read_references()?;
+        let references = read_references(&self.path)?;
         let project = Self::project(&references.provider_location)?;
         let mut keys = models::KeysFile::default();
         for (key, reference) in &references.encryption_keys {
@@ -891,7 +840,7 @@ impl KeyStore for GoogleKeyStore {
                 .await?;
             references.signature_keys.insert(key.clone(), reference);
         }
-        self.write_references(&references, true)
+        write_references(&self.path, &references, true)
     }
 
     async fn save(
@@ -900,7 +849,7 @@ impl KeyStore for GoogleKeyStore {
         workspace_name: &str,
         pending: &IndexMap<KeyId, Change>,
     ) -> Result<()> {
-        let mut references = self.read_references()?;
+        let mut references = read_references(&self.path)?;
         let project = Self::project(&references.provider_location)?;
         for (id, change) in pending {
             let (key, kind, values, refs) = match id {
@@ -935,7 +884,7 @@ impl KeyStore for GoogleKeyStore {
                 }
             }
         }
-        self.write_references(&references, false)
+        write_references(&self.path, &references, false)
     }
 }
 
@@ -1201,13 +1150,6 @@ mod tests {
         }
     }
 
-    fn azure_store(root: &Path) -> AzureKeyStore {
-        AzureKeyStore::new(
-            root,
-            azure_identity::DeveloperToolsCredential::new(None).unwrap(),
-        )
-    }
-
     fn assert_secret_name(name: &str) {
         assert!((1..=127).contains(&name.len()), "invalid length: {name}");
         assert!(
@@ -1283,33 +1225,131 @@ mod tests {
     }
 
     #[test]
-    fn azure_references_create_then_update_preserves_urls_and_logical_names() {
-        let root = TempDir::new("azure-references");
-        let store = azure_store(&root.0);
-        let provider_location = "https://test.vault.azure.net/";
-        let encryption_uri = "https://test.vault.azure.net/secrets/env-key/version1";
-        let signature_uri = "https://test.vault.azure.net/secrets/signing-key/version2";
-        let mut references = models::KeysReferenceFile::new(provider_location.into());
-        references
-            .encryption_keys
-            .insert("preview_env".into(), encryption_uri.into());
-        store.write_references(&references, true).unwrap();
-        assert!(store.write_references(&references, true).is_err());
+    fn key_references_create_then_update_preserves_locations_and_logical_names() {
+        for (provider_location, encryption_reference, signature_reference) in [
+            (
+                "https://test.vault.azure.net/",
+                "https://test.vault.azure.net/secrets/env-key/version1",
+                "https://test.vault.azure.net/secrets/signing-key/version2",
+            ),
+            (
+                AWS_REGION,
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:env-Abc123#11111111-1111-1111-1111-111111111111",
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:sig-Abc123#22222222-2222-2222-2222-222222222222",
+            ),
+            (
+                "projects/test-project",
+                "projects/test-project/secrets/env-key/versions/1",
+                "projects/test-project/secrets/signing-key/versions/2",
+            ),
+        ] {
+            let root = TempDir::new("key-references");
+            let path = root.0.join(".ramenv.keyrefs.toml");
+            let mut references = models::KeysReferenceFile::new(provider_location.into());
+            references
+                .encryption_keys
+                .insert("preview_env".into(), encryption_reference.into());
+            write_references(&path, &references, true).unwrap();
+            let original_content = std::fs::read_to_string(&path).unwrap();
 
-        references
-            .signature_keys
-            .insert("/".into(), signature_uri.into());
-        store.write_references(&references, false).unwrap();
-        let reloaded = store.read_references().unwrap();
-        assert_eq!(reloaded.provider_location, provider_location);
-        assert_eq!(reloaded.encryption_keys["preview_env"], encryption_uri);
-        assert_eq!(reloaded.signature_keys["/"], signature_uri);
+            references
+                .signature_keys
+                .insert("/".into(), signature_reference.into());
+            assert!(write_references(&path, &references, true).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original_content);
 
-        references.encryption_keys.shift_remove("preview_env");
-        store.write_references(&references, false).unwrap();
-        let reloaded = store.read_references().unwrap();
-        assert!(reloaded.encryption_keys.is_empty());
-        assert_eq!(reloaded.signature_keys["/"], signature_uri);
+            write_references(&path, &references, false).unwrap();
+            let reloaded = read_references(&path).unwrap();
+            assert_eq!(reloaded.provider_location, provider_location);
+            assert_eq!(
+                reloaded.encryption_keys["preview_env"],
+                encryption_reference
+            );
+            assert_eq!(reloaded.signature_keys["/"], signature_reference);
+
+            references.encryption_keys.shift_remove("preview_env");
+            write_references(&path, &references, false).unwrap();
+            let reloaded = read_references(&path).unwrap();
+            assert_eq!(reloaded.provider_location, provider_location);
+            assert!(reloaded.encryption_keys.is_empty());
+            assert_eq!(reloaded.signature_keys["/"], signature_reference);
+        }
+    }
+
+    #[test]
+    fn key_references_report_missing_and_malformed_files() {
+        let root = TempDir::new("key-references-invalid");
+        let path = root.0.join(".ramenv.keyrefs.toml");
+        assert_eq!(
+            read_references(&path).unwrap_err().to_string(),
+            format!("failed to read keys file {}", path.display())
+        );
+        for content in ["invalid = [toml", "provider_location = 'test'"] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(
+                read_references(&path).unwrap_err().to_string(),
+                "failed to parse key references"
+            );
+        }
+    }
+
+    #[test]
+    fn key_references_update_requires_existing_writable_file() {
+        let root = TempDir::new("key-references-unwritable");
+        let path = root.0.join(".ramenv.keyrefs.toml");
+        let references = models::KeysReferenceFile::new("test".into());
+        assert!(write_references(&path, &references, false).is_err());
+        assert!(!path.exists());
+
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_references(&path, &references, false).is_err());
+        assert!(write_references(&path, &references, true).is_err());
+        assert!(path.is_dir());
+    }
+
+    #[tokio::test]
+    async fn azure_store_rejects_missing_upsert_values_without_changing_references() {
+        let root = TempDir::new("azure-missing-upsert-values");
+        let mut store = AzureKeyStore::new(
+            &root.0,
+            azure_identity::DeveloperToolsCredential::new(None).unwrap(),
+        );
+        let mut references = models::KeysReferenceFile::new("https://test.vault.azure.net/".into());
+        references.encryption_keys.insert(
+            "shared".into(),
+            "https://test.vault.azure.net/secrets/env-key/version1".into(),
+        );
+        references.signature_keys.insert(
+            "shared".into(),
+            "https://test.vault.azure.net/secrets/signing-key/version2".into(),
+        );
+        write_references(&store.path, &references, true).unwrap();
+        let before = std::fs::read_to_string(&store.path).unwrap();
+
+        for (id, kind) in [
+            (KeyId::Encryption("shared".into()), "encryption"),
+            (KeyId::Signature("shared".into()), "signature"),
+        ] {
+            let mut keys = KeysFile::default();
+            // A value in the other key kind must not satisfy the pending upsert.
+            match &id {
+                KeyId::Encryption(key) => {
+                    keys.signature_keys.insert(key.clone(), SIGNING_KEY.into());
+                }
+                KeyId::Signature(key) => {
+                    keys.encryption_keys.insert(key.clone(), ENV_KEY.into());
+                }
+            }
+            let error = store
+                .save(&keys, "workspace", &IndexMap::from([(id, Change::Upsert)]))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("{kind} key not found for shared")
+            );
+            assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+        }
     }
 
     const AWS_REGION: &str = "us-east-1";
@@ -1436,7 +1476,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let refs = store.read_references().unwrap();
+        let refs = read_references(&store.path).unwrap();
         assert_eq!(refs.provider_location, AWS_REGION);
         assert_eq!(
             refs.encryption_keys["development"],
@@ -1462,7 +1502,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let refs = store.read_references().unwrap();
+        let refs = read_references(&store.path).unwrap();
         assert!(refs.encryption_keys.is_empty());
         assert_eq!(
             refs.signature_keys["/"],
@@ -1497,7 +1537,7 @@ mod tests {
         let mut refs = models::KeysReferenceFile::new(AWS_REGION.into());
         refs.signature_keys
             .insert("/".into(), format!("{AWS_SIG_ARN}#{AWS_VERSION}"));
-        store.write_references(&refs, true).unwrap();
+        write_references(&store.path, &refs, true).unwrap();
         let before = std::fs::read_to_string(&store.path).unwrap();
         let mut keys = KeysFile::default();
         keys.signature_keys.insert("/".into(), ENV_KEY.into());
@@ -1638,7 +1678,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let refs = store.read_references().unwrap();
+        let refs = read_references(&store.path).unwrap();
         assert_eq!(refs.provider_location, "projects/test-project");
         assert!(refs.encryption_keys["development"].ends_with("/versions/1"));
         let content = std::fs::read_to_string(&store.path).unwrap();
@@ -1662,7 +1702,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let refs = store.read_references().unwrap();
+        let refs = read_references(&store.path).unwrap();
         assert!(refs.encryption_keys.is_empty());
         assert!(refs.signature_keys["/"].ends_with("/versions/2"));
         assert_eq!(
