@@ -5,6 +5,10 @@ edition = "2024"
 description = "Encrypted environment variable manager with optional validation and monorepo support"
 license = "MIT"
 default-run = "ramenv"
+repository = "https://github.com/lczerniawski/ramenv"
+readme = "README.md"
+keywords = ["environment", "secrets", "encryption", "dotenv", "monorepo"]
+categories = ["command-line-utilities", "config"]
 
 [dependencies]
 aes-gcm = "0.11.0"
