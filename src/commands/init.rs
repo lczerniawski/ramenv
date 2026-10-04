@@ -124,18 +124,28 @@ async fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
     let workspace_registry = services::WorkspaceRegistry::load(current_working_path)?;
     let key_file_name = match workspace_registry.get_provider() {
         Provider::Local => ".ramenv.keys",
-        Provider::Azure => ".ramenv.keyrefs.toml",
+        Provider::Azure | Provider::Aws | Provider::Google => ".ramenv.keyrefs.toml",
     };
     let keys_path = current_working_path.join(key_file_name);
     if keys_path.exists() {
         Ok(InitStatus::Skipped)
     } else {
-        let provider_url = match workspace_registry.get_provider() {
+        let provider_location = match workspace_registry.get_provider() {
             Provider::Local => None,
             Provider::Azure => Some(
                 Text::new("enter provider url for Azure:")
                     .prompt()
                     .context("failed to get the provider url")?,
+            ),
+            Provider::Aws => Some(
+                Text::new("enter AWS region (e.g. us-east-1):")
+                    .prompt()
+                    .context("failed to get the AWS region")?,
+            ),
+            Provider::Google => Some(
+                Text::new("enter Google Cloud project ID:")
+                    .prompt()
+                    .context("failed to get the Google Cloud project ID")?,
             ),
         };
         match workspace_registry.get_provider() {
@@ -144,7 +154,7 @@ async fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
                 create_keys(
                     store,
                     workspace_registry.get_workspace_name(),
-                    provider_url.as_deref(),
+                    provider_location.as_deref(),
                 )
                 .await?;
             }
@@ -154,7 +164,25 @@ async fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
                 create_keys(
                     store,
                     workspace_registry.get_workspace_name(),
-                    provider_url.as_deref(),
+                    provider_location.as_deref(),
+                )
+                .await?;
+            }
+            Provider::Aws => {
+                let store = services::AwsKeyStore::new(current_working_path).await;
+                create_keys(
+                    store,
+                    workspace_registry.get_workspace_name(),
+                    provider_location.as_deref(),
+                )
+                .await?;
+            }
+            Provider::Google => {
+                let store = services::GoogleKeyStore::new(current_working_path).await?;
+                create_keys(
+                    store,
+                    workspace_registry.get_workspace_name(),
+                    provider_location.as_deref(),
                 )
                 .await?;
             }
@@ -166,12 +194,12 @@ async fn init_keys_file(current_working_path: &Path) -> Result<InitStatus> {
 async fn create_keys<S: services::KeyStore>(
     store: S,
     workspace_name: &str,
-    provider_url: Option<&str>,
+    provider_location: Option<&str>,
 ) -> Result<()> {
     let mut keys = services::KeyService::from_empty(store);
     keys.store_new_env_key("development");
     keys.store_new_env_key("production");
-    keys.create(workspace_name, provider_url).await
+    keys.create(workspace_name, provider_location).await
 }
 
 async fn init_vault_file(
@@ -198,6 +226,14 @@ async fn init_vault_file(
         Provider::Azure => {
             let credential = crate::azure_auth::azure_credential().await?;
             let store = services::AzureKeyStore::new(&workspace_root, credential);
+            create_vault(current_working_path, workspace_registry, vault_name, store).await?;
+        }
+        Provider::Aws => {
+            let store = services::AwsKeyStore::new(&workspace_root).await;
+            create_vault(current_working_path, workspace_registry, vault_name, store).await?;
+        }
+        Provider::Google => {
+            let store = services::GoogleKeyStore::new(&workspace_root).await?;
             create_vault(current_working_path, workspace_registry, vault_name, store).await?;
         }
     }
@@ -340,24 +376,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_init_uses_persisted_azure_provider_when_keys_already_exist() {
-        let root = TempDir::new();
-        init_workspace_file(&root.0, Some(Provider::Azure)).unwrap();
-        std::fs::write(root.0.join(".ramenv.keyrefs.toml"), "existing references").unwrap();
+    async fn workspace_init_uses_persisted_cloud_provider_when_keys_already_exist() {
+        for provider in [Provider::Azure, Provider::Aws, Provider::Google] {
+            let root = TempDir::new();
+            init_workspace_file(&root.0, Some(provider)).unwrap();
+            std::fs::write(root.0.join(".ramenv.keyrefs.toml"), "existing references").unwrap();
 
-        // No Azure prompt or local keys file: the saved workspace provider wins.
-        init_command(
-            &root.0,
-            Some(InitTarget::Workspace { ingredient: None }),
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(!root.0.join(".ramenv.keys").exists());
-        assert_eq!(
-            std::fs::read_to_string(root.0.join(".ramenv.keyrefs.toml")).unwrap(),
-            "existing references"
-        );
+            // No credentials, cloud prompts, or local keys file: the saved provider wins.
+            init_command(
+                &root.0,
+                Some(InitTarget::Workspace { ingredient: None }),
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(!root.0.join(".ramenv.keys").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.0.join(".ramenv.keyrefs.toml")).unwrap(),
+                "existing references"
+            );
+        }
     }
 
     #[tokio::test]

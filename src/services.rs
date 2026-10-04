@@ -3,10 +3,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Ok, Result};
+use anyhow::{Context, Result};
+use aws_config::{BehaviorVersion, SdkConfig};
+use aws_sdk_secretsmanager::{Client as AwsSecretClient, config::Region};
 use azure_core::credentials::TokenCredential;
 use azure_security_keyvault_secrets::models::{SecretClientGetSecretOptions, SetSecretParameters};
 use azure_security_keyvault_secrets::{ResourceExt, SecretClient};
+use google_cloud_gax::error::rpc::Code;
+use google_cloud_secretmanager_v1::{
+    client::SecretManagerService,
+    model::{Replication, Secret, SecretPayload, replication::Automatic},
+};
 use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -40,7 +47,7 @@ pub trait KeyStore {
         &mut self,
         keys: &models::KeysFile,
         workspace_name: &str,
-        provider_url: Option<&str>,
+        provider_location: Option<&str>,
     ) -> Result<()>;
     async fn save(
         &mut self,
@@ -84,9 +91,13 @@ impl<S: KeyStore> KeyService<S> {
         }
     }
 
-    pub async fn create(&mut self, workspace_name: &str, provider_url: Option<&str>) -> Result<()> {
+    pub async fn create(
+        &mut self,
+        workspace_name: &str,
+        provider_location: Option<&str>,
+    ) -> Result<()> {
         self.store
-            .create(&self.keys_file(), workspace_name, provider_url)
+            .create(&self.keys_file(), workspace_name, provider_location)
             .await
     }
 }
@@ -161,6 +172,31 @@ impl LocalKeyStore {
     }
 }
 
+// A common naming format valid for all three cloud secret stores.
+fn secret_name(workspace_name: &str, kind: &str, key: &str) -> String {
+    let name = format!("ramenv-{workspace_name}-{kind}-{key}");
+
+    // Keep a readable ASCII prefix plus a digest of the original name so
+    // replacing path separators or truncating long names does not merge keys.
+    // 62 prefix bytes + one hyphen + 64 SHA-256 hex digits = 127 bytes.
+    let prefix: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .take(62)
+        .collect();
+    let digest: String = Sha256::digest(name.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{prefix}-{digest}")
+}
+
 fn write_file(path: &Path, content: &str, create: bool) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true);
@@ -190,7 +226,7 @@ impl KeyStore for LocalKeyStore {
         &mut self,
         keys: &models::KeysFile,
         _workspace_name: &str,
-        _provider_url: Option<&str>,
+        _provider_location: Option<&str>,
     ) -> Result<()> {
         write_file(
             &self.path,
@@ -267,42 +303,6 @@ impl AzureKeyStore {
             create,
         )
     }
-
-    fn secret_name(workspace_name: &str, kind: &str, key: &str) -> String {
-        let name = format!("ramenv-{workspace_name}-{kind}-{key}");
-        let allowed = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-';
-        if name.len() <= 127 && name.bytes().all(allowed) {
-            return name;
-        }
-
-        // Keep a readable ASCII prefix plus a digest of the original name so
-        // replacing path separators or truncating long names does not merge keys.
-        // 62 prefix bytes + one hyphen + 64 SHA-256 hex digits = 127 bytes.
-        let prefix: String = name
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '-' {
-                    ch
-                } else {
-                    '-'
-                }
-            })
-            .take(62)
-            .collect();
-        let digest: String = Sha256::digest(name.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        format!("{prefix}-{digest}")
-    }
-
-    fn encryption_key_name_format(&self, key: &str, workspace_name: &str) -> String {
-        Self::secret_name(workspace_name, "encryption", key)
-    }
-
-    fn signature_key_name_format(&self, key: &str, workspace_name: &str) -> String {
-        Self::secret_name(workspace_name, "signature", key)
-    }
 }
 
 impl KeyStore for AzureKeyStore {
@@ -333,11 +333,12 @@ impl KeyStore for AzureKeyStore {
         &mut self,
         keys: &models::KeysFile,
         workspace_name: &str,
-        provider_url: Option<&str>,
+        provider_location: Option<&str>,
     ) -> Result<()> {
-        let provider_url = provider_url.expect("provider_url is required when creating keys");
-        let client = SecretClient::new(provider_url, self.credential.clone(), None)?;
-        let mut reference_keys_file = models::KeysReferenceFile::new(provider_url.to_string());
+        let provider_location =
+            provider_location.expect("provider_location is required when creating keys");
+        let client = SecretClient::new(provider_location, self.credential.clone(), None)?;
+        let mut reference_keys_file = models::KeysReferenceFile::new(provider_location.to_string());
 
         for (key, value) in keys.encryption_keys.iter() {
             let secret_set_parameter = SetSecretParameters {
@@ -346,7 +347,7 @@ impl KeyStore for AzureKeyStore {
             };
             let secret = client
                 .set_secret(
-                    &self.encryption_key_name_format(key, workspace_name),
+                    &secret_name(workspace_name, "encryption", key),
                     secret_set_parameter.try_into()?,
                     None,
                 )
@@ -365,7 +366,7 @@ impl KeyStore for AzureKeyStore {
             };
             let secret = client
                 .set_secret(
-                    &self.signature_key_name_format(key, workspace_name),
+                    &secret_name(workspace_name, "signature", key),
                     secret_set_parameter.try_into()?,
                     None,
                 )
@@ -388,7 +389,7 @@ impl KeyStore for AzureKeyStore {
     ) -> Result<()> {
         let mut reference_keys_file = self.read_references()?;
         let client = SecretClient::new(
-            &reference_keys_file.provider_url,
+            &reference_keys_file.provider_location,
             self.credential.clone(),
             None,
         )?;
@@ -408,7 +409,7 @@ impl KeyStore for AzureKeyStore {
                         };
                         let secret = client
                             .set_secret(
-                                &self.encryption_key_name_format(key, workspace_name),
+                                &secret_name(workspace_name, "encryption", key),
                                 secret_set_parameter.try_into()?,
                                 None,
                             )
@@ -424,14 +425,14 @@ impl KeyStore for AzureKeyStore {
                             .signature_keys
                             .get(key)
                             .cloned()
-                            .expect("encryption key not found");
+                            .expect("signature key not found");
                         let secret_set_parameter = SetSecretParameters {
                             value: Some(signature_key),
                             ..Default::default()
                         };
                         let secret = client
                             .set_secret(
-                                &self.signature_key_name_format(key, workspace_name),
+                                &secret_name(workspace_name, "signature", key),
                                 secret_set_parameter.try_into()?,
                                 None,
                             )
@@ -446,19 +447,13 @@ impl KeyStore for AzureKeyStore {
                 Change::Remove => match key_id {
                     KeyId::Encryption(key) => {
                         client
-                            .delete_secret(
-                                &self.encryption_key_name_format(key, workspace_name),
-                                None,
-                            )
+                            .delete_secret(&secret_name(workspace_name, "encryption", key), None)
                             .await?;
                         reference_keys_file.encryption_keys.shift_remove(key);
                     }
                     KeyId::Signature(key) => {
                         client
-                            .delete_secret(
-                                &self.signature_key_name_format(key, workspace_name),
-                                None,
-                            )
+                            .delete_secret(&secret_name(workspace_name, "signature", key), None)
                             .await?;
                         reference_keys_file.signature_keys.shift_remove(key);
                     }
@@ -467,6 +462,480 @@ impl KeyStore for AzureKeyStore {
         }
 
         self.write_references(&reference_keys_file, false)
+    }
+}
+
+pub struct AwsKeyStore {
+    path: PathBuf,
+    config: SdkConfig,
+}
+
+impl AwsKeyStore {
+    pub async fn new(workspace_root: &Path) -> Self {
+        // Let the SDK's default credential chain select credentials automatically.
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        Self {
+            path: workspace_root.join(".ramenv.keyrefs.toml"),
+            config,
+        }
+    }
+
+    fn region(provider_location: &str) -> Result<&str> {
+        let region = provider_location.trim();
+        if region.is_empty()
+            || !region.contains('-')
+            || !region
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            anyhow::bail!("AWS provider location must be a region such as us-east-1");
+        }
+        Ok(region)
+    }
+
+    fn client(&self, region: &str) -> AwsSecretClient {
+        AwsSecretClient::from_conf(
+            aws_sdk_secretsmanager::config::Builder::from(&self.config)
+                .region(Region::new(region.to_owned()))
+                .build(),
+        )
+    }
+
+    fn secret_reference<'a>(reference: &'a str, region: &str) -> Result<(&'a str, &'a str)> {
+        let (arn, version) = reference
+            .split_once('#')
+            .context("invalid AWS secret reference: expected ARN#VersionId")?;
+        let parts: Vec<_> = arn.splitn(7, ':').collect();
+        if !matches!(parts.as_slice(), ["arn", partition, "secretsmanager", arn_region, account, "secret", name]
+            if !partition.is_empty() && *arn_region == region && account.len() == 12
+                && account.bytes().all(|b| b.is_ascii_digit()) && !name.is_empty())
+            || !(32..=64).contains(&version.len())
+            || !version
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            anyhow::bail!("invalid AWS secret reference or region mismatch");
+        }
+        Ok((arn, version))
+    }
+
+    fn version_reference(arn: Option<&str>, version: Option<&str>, region: &str) -> Result<String> {
+        let reference = format!(
+            "{}#{}",
+            arn.context("AWS returned no secret ARN")?,
+            version.context("AWS returned no secret version")?
+        );
+        Self::secret_reference(&reference, region)?;
+        Ok(reference)
+    }
+
+    async fn read_key(&self, reference: &str, region: &str) -> Result<String> {
+        let (arn, version) = Self::secret_reference(reference, region)?;
+        let secret = self
+            .client(region)
+            .get_secret_value()
+            .secret_id(arn)
+            .version_id(version)
+            .send()
+            .await
+            .context("failed to read AWS Secrets Manager secret")?;
+        secret
+            .secret_string
+            .context("AWS returned no secret string")
+    }
+
+    async fn write_key(&self, region: &str, name: &str, value: &str) -> Result<String> {
+        let client = self.client(region);
+        match client
+            .create_secret()
+            .name(name)
+            .secret_string(value)
+            .send()
+            .await
+        {
+            Ok(secret) => Self::version_reference(secret.arn(), secret.version_id(), region),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|e| e.is_resource_exists_exception()) =>
+            {
+                let secret = client
+                    .put_secret_value()
+                    .secret_id(name)
+                    .secret_string(value)
+                    .send()
+                    .await
+                    .context("failed to update AWS Secrets Manager secret")?;
+                Self::version_reference(secret.arn(), secret.version_id(), region)
+            }
+            Err(error) => Err(error).context("failed to create AWS Secrets Manager secret"),
+        }
+    }
+
+    async fn delete_key(&self, reference: &str, region: &str) -> Result<()> {
+        let (arn, _) = Self::secret_reference(reference, region)?;
+        // Keep AWS's default recovery window instead of force-deleting keys.
+        match self
+            .client(region)
+            .delete_secret()
+            .secret_id(arn)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|e| e.is_resource_not_found_exception()) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error).context("failed to delete AWS Secrets Manager secret"),
+        }
+    }
+
+    fn read_references(&self) -> Result<models::KeysReferenceFile> {
+        let content = std::fs::read_to_string(&self.path)
+            .with_context(|| format!("failed to read keys file {}", self.path.display()))?;
+        toml::from_str(&content).context("failed to parse key references")
+    }
+
+    fn write_references(&self, references: &models::KeysReferenceFile, create: bool) -> Result<()> {
+        write_file(
+            &self.path,
+            &toml::to_string(references).context("failed to serialize key references")?,
+            create,
+        )
+    }
+}
+
+impl KeyStore for AwsKeyStore {
+    async fn load(&self) -> Result<models::KeysFile> {
+        if !self.path.exists() {
+            anyhow::bail!("keys file does not exist, please run `ramenv init` first");
+        }
+        let references = self.read_references()?;
+        let region = Self::region(&references.provider_location)?;
+        let mut keys = models::KeysFile::default();
+        for (key, reference) in &references.encryption_keys {
+            keys.encryption_keys
+                .insert(key.clone(), self.read_key(reference, region).await?);
+        }
+        for (key, reference) in &references.signature_keys {
+            keys.signature_keys
+                .insert(key.clone(), self.read_key(reference, region).await?);
+        }
+        Ok(keys)
+    }
+
+    async fn create(
+        &mut self,
+        keys: &models::KeysFile,
+        workspace_name: &str,
+        provider_location: Option<&str>,
+    ) -> Result<()> {
+        if self.path.exists() {
+            anyhow::bail!("key references file already exists");
+        }
+        let region =
+            Self::region(provider_location.context("AWS region is required when creating keys")?)?;
+        let mut references = models::KeysReferenceFile::new(region.to_string());
+        for (key, value) in &keys.encryption_keys {
+            let reference = self
+                .write_key(
+                    region,
+                    &secret_name(workspace_name, "encryption", key),
+                    value,
+                )
+                .await?;
+            references.encryption_keys.insert(key.clone(), reference);
+        }
+        for (key, value) in &keys.signature_keys {
+            let reference = self
+                .write_key(
+                    region,
+                    &secret_name(workspace_name, "signature", key),
+                    value,
+                )
+                .await?;
+            references.signature_keys.insert(key.clone(), reference);
+        }
+        self.write_references(&references, true)
+    }
+
+    async fn save(
+        &mut self,
+        keys: &models::KeysFile,
+        workspace_name: &str,
+        pending: &IndexMap<KeyId, Change>,
+    ) -> Result<()> {
+        let mut references = self.read_references()?;
+        let region = Self::region(&references.provider_location)?.to_string();
+        for (id, change) in pending {
+            let (key, kind, values, refs) = match id {
+                KeyId::Encryption(key) => (
+                    key,
+                    "encryption",
+                    &keys.encryption_keys,
+                    &mut references.encryption_keys,
+                ),
+                KeyId::Signature(key) => (
+                    key,
+                    "signature",
+                    &keys.signature_keys,
+                    &mut references.signature_keys,
+                ),
+            };
+            match change {
+                Change::Upsert => {
+                    let value = values
+                        .get(key)
+                        .with_context(|| format!("{kind} key not found for {key}"))?;
+                    let reference = self
+                        .write_key(&region, &secret_name(workspace_name, kind, key), value)
+                        .await?;
+                    refs.insert(key.clone(), reference);
+                }
+                Change::Remove => {
+                    if let Some(reference) = refs.get(key) {
+                        self.delete_key(reference, &region).await?;
+                        refs.shift_remove(key);
+                    }
+                }
+            }
+        }
+        self.write_references(&references, false)
+    }
+}
+
+pub struct GoogleKeyStore {
+    path: PathBuf,
+    client: SecretManagerService,
+}
+
+impl GoogleKeyStore {
+    pub async fn new(workspace_root: &Path) -> Result<Self> {
+        // The default builder uses Google's Application Default Credentials.
+        let client = SecretManagerService::builder()
+            .build()
+            .await
+            .context("failed to configure Google Secret Manager client")?;
+        Ok(Self {
+            path: workspace_root.join(".ramenv.keyrefs.toml"),
+            client,
+        })
+    }
+
+    fn project(provider_location: &str) -> Result<String> {
+        let project = provider_location
+            .trim()
+            .strip_prefix("projects/")
+            .unwrap_or(provider_location.trim());
+        if project.is_empty()
+            || !project
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            anyhow::bail!("Google provider location must be a project ID or projects/<project-id>");
+        }
+        Ok(format!("projects/{project}"))
+    }
+
+    fn secret_reference<'a>(reference: &'a str, project: &str) -> Result<&'a str> {
+        let (secret, version) = reference
+            .rsplit_once("/versions/")
+            .context("invalid Google secret reference: expected a versioned resource name")?;
+        let prefix = format!("{project}/secrets/");
+        let name = secret
+            .strip_prefix(&prefix)
+            .context("Google secret reference project mismatch")?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || !version.bytes().all(|b| b.is_ascii_digit())
+            || !version.parse::<u64>().is_ok_and(|v| v > 0)
+        {
+            anyhow::bail!("invalid Google secret reference");
+        }
+        Ok(secret)
+    }
+
+    async fn read_key(&self, reference: &str, project: &str) -> Result<String> {
+        Self::secret_reference(reference, project)?;
+        let secret = self
+            .client
+            .access_secret_version()
+            .set_name(reference)
+            .send()
+            .await
+            .context("failed to read Google Secret Manager secret")?;
+        let payload = secret
+            .payload
+            .context("Google returned no secret payload")?;
+        String::from_utf8(payload.data.to_vec()).context("Google secret value is not UTF-8")
+    }
+
+    async fn write_key(&self, project: &str, name: &str, value: &str) -> Result<String> {
+        let secret =
+            Secret::new().set_replication(Replication::new().set_automatic(Automatic::new()));
+        match self
+            .client
+            .create_secret()
+            .set_parent(project)
+            .set_secret_id(name)
+            .set_secret(secret)
+            .send()
+            .await
+        {
+            Ok(_) => {}
+            Err(error)
+                if error
+                    .status()
+                    .is_some_and(|status| status.code == Code::AlreadyExists) => {}
+            Err(error) => {
+                return Err(error).context("failed to create Google Secret Manager secret");
+            }
+        }
+        let version = self
+            .client
+            .add_secret_version()
+            .set_parent(format!("{project}/secrets/{name}"))
+            .set_payload(SecretPayload::new().set_data(value.to_owned().into_bytes()))
+            .send()
+            .await
+            .context("failed to write Google Secret Manager secret version")?;
+        Self::secret_reference(&version.name, project)?;
+        Ok(version.name)
+    }
+
+    async fn delete_key(&self, reference: &str, project: &str) -> Result<()> {
+        let secret = Self::secret_reference(reference, project)?;
+        match self.client.delete_secret().set_name(secret).send().await {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error
+                    .status()
+                    .is_some_and(|status| status.code == Code::NotFound) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error).context("failed to delete Google Secret Manager secret"),
+        }
+    }
+
+    fn read_references(&self) -> Result<models::KeysReferenceFile> {
+        let content = std::fs::read_to_string(&self.path)
+            .with_context(|| format!("failed to read keys file {}", self.path.display()))?;
+        toml::from_str(&content).context("failed to parse key references")
+    }
+
+    fn write_references(&self, references: &models::KeysReferenceFile, create: bool) -> Result<()> {
+        write_file(
+            &self.path,
+            &toml::to_string(references).context("failed to serialize key references")?,
+            create,
+        )
+    }
+}
+
+impl KeyStore for GoogleKeyStore {
+    async fn load(&self) -> Result<models::KeysFile> {
+        if !self.path.exists() {
+            anyhow::bail!("keys file does not exist, please run `ramenv init` first");
+        }
+        let references = self.read_references()?;
+        let project = Self::project(&references.provider_location)?;
+        let mut keys = models::KeysFile::default();
+        for (key, reference) in &references.encryption_keys {
+            keys.encryption_keys
+                .insert(key.clone(), self.read_key(reference, &project).await?);
+        }
+        for (key, reference) in &references.signature_keys {
+            keys.signature_keys
+                .insert(key.clone(), self.read_key(reference, &project).await?);
+        }
+        Ok(keys)
+    }
+
+    async fn create(
+        &mut self,
+        keys: &models::KeysFile,
+        workspace_name: &str,
+        provider_location: Option<&str>,
+    ) -> Result<()> {
+        if self.path.exists() {
+            anyhow::bail!("key references file already exists");
+        }
+        let project = Self::project(
+            provider_location.context("Google project is required when creating keys")?,
+        )?;
+        let mut references = models::KeysReferenceFile::new(project.clone());
+        for (key, value) in &keys.encryption_keys {
+            let reference = self
+                .write_key(
+                    &project,
+                    &secret_name(workspace_name, "encryption", key),
+                    value,
+                )
+                .await?;
+            references.encryption_keys.insert(key.clone(), reference);
+        }
+        for (key, value) in &keys.signature_keys {
+            let reference = self
+                .write_key(
+                    &project,
+                    &secret_name(workspace_name, "signature", key),
+                    value,
+                )
+                .await?;
+            references.signature_keys.insert(key.clone(), reference);
+        }
+        self.write_references(&references, true)
+    }
+
+    async fn save(
+        &mut self,
+        keys: &models::KeysFile,
+        workspace_name: &str,
+        pending: &IndexMap<KeyId, Change>,
+    ) -> Result<()> {
+        let mut references = self.read_references()?;
+        let project = Self::project(&references.provider_location)?;
+        for (id, change) in pending {
+            let (key, kind, values, refs) = match id {
+                KeyId::Encryption(key) => (
+                    key,
+                    "encryption",
+                    &keys.encryption_keys,
+                    &mut references.encryption_keys,
+                ),
+                KeyId::Signature(key) => (
+                    key,
+                    "signature",
+                    &keys.signature_keys,
+                    &mut references.signature_keys,
+                ),
+            };
+            match change {
+                Change::Upsert => {
+                    let value = values
+                        .get(key)
+                        .with_context(|| format!("{kind} key not found for {key}"))?;
+                    let reference = self
+                        .write_key(&project, &secret_name(workspace_name, kind, key), value)
+                        .await?;
+                    refs.insert(key.clone(), reference);
+                }
+                Change::Remove => {
+                    if let Some(reference) = refs.get(key) {
+                        self.delete_key(reference, &project).await?;
+                        refs.shift_remove(key);
+                    }
+                }
+            }
+        }
+        self.write_references(&references, false)
     }
 }
 
@@ -739,7 +1208,7 @@ mod tests {
         )
     }
 
-    fn assert_azure_secret_name(name: &str) {
+    fn assert_secret_name(name: &str) {
         assert!((1..=127).contains(&name.len()), "invalid length: {name}");
         assert!(
             name.bytes()
@@ -749,80 +1218,78 @@ mod tests {
     }
 
     #[test]
-    fn azure_secret_names_preserve_existing_valid_names() {
-        let store = azure_store(Path::new("."));
+    fn secret_names_always_include_digest() {
         assert_eq!(
-            store.encryption_key_name_format("development", "my-project"),
-            "ramenv-my-project-encryption-development"
+            secret_name("my-project", "encryption", "development"),
+            "ramenv-my-project-encryption-development-c185af168e7266c730e96307bcce6f6a4b74fe8a7ccb9527ce01de70d87bde0d"
         );
         assert_eq!(
-            store.signature_key_name_format("api", "my-project"),
-            "ramenv-my-project-signature-api"
+            secret_name("my-project", "signature", "api"),
+            "ramenv-my-project-signature-api-26b91ccabc1672d01a6e34014145b7a2abdb64064ea590aab814e2cce4b73247"
         );
     }
 
     #[test]
-    fn azure_secret_names_support_underscores_paths_and_unicode() {
-        let store = azure_store(Path::new("."));
-        for workspace in ["azure_test", "my project", "项目"] {
-            for key in ["development", "preview_env", "/", "services/api", "服务/api"] {
-                assert_azure_secret_name(&store.encryption_key_name_format(key, workspace));
-                assert_azure_secret_name(&store.signature_key_name_format(key, workspace));
+    fn secret_names_support_underscores_paths_and_unicode() {
+        for workspace in ["cloud_test", "my project", "项目"] {
+            for key in [
+                "development",
+                "preview_env",
+                "/",
+                "services/api",
+                "服务/api",
+            ] {
+                assert_secret_name(&secret_name(workspace, "encryption", key));
+                assert_secret_name(&secret_name(workspace, "signature", key));
             }
         }
     }
 
     #[test]
-    fn azure_secret_names_are_stable_and_distinguish_normalized_inputs() {
-        let store = azure_store(Path::new("."));
-        let name = store.encryption_key_name_format("development", "azure_test");
-        assert_eq!(
-            name,
-            store.encryption_key_name_format("development", "azure_test")
+    fn secret_names_are_stable_and_distinguish_normalized_inputs() {
+        let name = secret_name("cloud_test", "encryption", "development");
+        assert_eq!(name, secret_name("cloud_test", "encryption", "development"));
+        assert_ne!(name, secret_name("cloud-test", "encryption", "development"));
+        assert_ne!(name, secret_name("cloud_test", "signature", "development"));
+        assert_ne!(
+            secret_name("test", "signature", "services/api"),
+            secret_name("test", "signature", "services-api")
         );
         assert_ne!(
-            name,
-            store.encryption_key_name_format("development", "azure-test")
-        );
-        assert_ne!(
-            store.signature_key_name_format("services/api", "test"),
-            store.signature_key_name_format("services-api", "test")
-        );
-        assert_ne!(
-            store.signature_key_name_format("services/api", "test"),
-            store.signature_key_name_format("services_api", "test")
+            secret_name("test", "signature", "services/api"),
+            secret_name("test", "signature", "services_api")
         );
     }
 
     #[test]
-    fn azure_secret_names_enforce_length_without_truncation_collisions() {
-        let store = azure_store(Path::new("."));
+    fn secret_names_enforce_length_without_truncation_collisions() {
         let workspace = "a".repeat(200);
         let key = "b".repeat(200);
-        let name = store.encryption_key_name_format(&key, &workspace);
-        assert_azure_secret_name(&name);
-        assert_azure_secret_name(&store.signature_key_name_format(&key, &workspace));
+        let name = secret_name(&workspace, "encryption", &key);
+        assert_secret_name(&name);
+        assert_secret_name(&secret_name(&workspace, "signature", &key));
         assert_ne!(
             name,
-            store.encryption_key_name_format(&format!("{key}c"), &workspace)
+            secret_name(&workspace, "encryption", &format!("{key}c"))
         );
         let boundary_workspace = "a".repeat(107);
-        let boundary = store.encryption_key_name_format("x", &boundary_workspace);
+        let boundary = secret_name(&boundary_workspace, "encryption", "x");
         assert_eq!(boundary.len(), 127);
-        assert_eq!(boundary, format!("ramenv-{boundary_workspace}-encryption-x"));
-        assert_azure_secret_name(
-            &store.encryption_key_name_format("xx", &boundary_workspace),
+        assert_eq!(
+            boundary,
+            "ramenv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dcaf694ac4d31bdcd7dd3f616c669fc7b22643d319436ed3b949c3f120a7199f"
         );
+        assert_secret_name(&secret_name(&boundary_workspace, "encryption", "xx"));
     }
 
     #[test]
     fn azure_references_create_then_update_preserves_urls_and_logical_names() {
         let root = TempDir::new("azure-references");
         let store = azure_store(&root.0);
-        let provider_url = "https://test.vault.azure.net/";
+        let provider_location = "https://test.vault.azure.net/";
         let encryption_uri = "https://test.vault.azure.net/secrets/env-key/version1";
         let signature_uri = "https://test.vault.azure.net/secrets/signing-key/version2";
-        let mut references = models::KeysReferenceFile::new(provider_url.into());
+        let mut references = models::KeysReferenceFile::new(provider_location.into());
         references
             .encryption_keys
             .insert("preview_env".into(), encryption_uri.into());
@@ -834,7 +1301,7 @@ mod tests {
             .insert("/".into(), signature_uri.into());
         store.write_references(&references, false).unwrap();
         let reloaded = store.read_references().unwrap();
-        assert_eq!(reloaded.provider_url, provider_url);
+        assert_eq!(reloaded.provider_location, provider_location);
         assert_eq!(reloaded.encryption_keys["preview_env"], encryption_uri);
         assert_eq!(reloaded.signature_keys["/"], signature_uri);
 
@@ -843,6 +1310,478 @@ mod tests {
         let reloaded = store.read_references().unwrap();
         assert!(reloaded.encryption_keys.is_empty());
         assert_eq!(reloaded.signature_keys["/"], signature_uri);
+    }
+
+    const AWS_REGION: &str = "us-east-1";
+    const AWS_ENV_ARN: &str = "arn:aws:secretsmanager:us-east-1:123456789012:secret:env-Abc123";
+    const AWS_SIG_ARN: &str = "arn:aws:secretsmanager:us-east-1:123456789012:secret:sig-Abc123";
+    const AWS_VERSION: &str = "11111111-1111-1111-1111-111111111111";
+    const AWS_NEXT_VERSION: &str = "22222222-2222-2222-2222-222222222222";
+
+    fn aws_test_store(root: &Path, endpoint: &str) -> AwsKeyStore {
+        let config = SdkConfig::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new(AWS_REGION))
+            .endpoint_url(endpoint)
+            .credentials_provider(
+                aws_sdk_secretsmanager::config::SharedCredentialsProvider::new(
+                    aws_sdk_secretsmanager::config::Credentials::new(
+                        "test", "test", None, None, "test",
+                    ),
+                ),
+            )
+            .build();
+        AwsKeyStore {
+            path: root.join(".ramenv.keyrefs.toml"),
+            config,
+        }
+    }
+
+    // Exercise the actual AWS SDK HTTP protocol without contacting AWS or finding credentials.
+    fn aws_server(
+        responses: Vec<(u16, serde_json::Value)>,
+    ) -> (
+        String,
+        std::thread::JoinHandle<Vec<(String, serde_json::Value)>>,
+    ) {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "timed out waiting for AWS request"
+                            );
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                }
+                let header = String::from_utf8(header).unwrap().to_lowercase();
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                let target = header
+                    .lines()
+                    .find_map(|line| line.strip_prefix("x-amz-target:"))
+                    .unwrap()
+                    .trim()
+                    .to_string();
+                let mut request = vec![0; length];
+                stream.read_exact(&mut request).unwrap();
+                requests.push((target, serde_json::from_slice(&request).unwrap()));
+                let body = body.to_string();
+                write!(stream, "HTTP/1.1 {status} Response\r\nContent-Type: application/x-amz-json-1.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (endpoint, handle)
+    }
+
+    #[tokio::test]
+    async fn aws_store_creates_loads_updates_and_removes_versioned_keys() {
+        use serde_json::json;
+        let root = TempDir::new("aws-store");
+        let (endpoint, server) = aws_server(vec![
+            (200, json!({"ARN": AWS_ENV_ARN, "VersionId": AWS_VERSION})),
+            (200, json!({"ARN": AWS_SIG_ARN, "VersionId": AWS_VERSION})),
+            (200, json!({"SecretString": ENV_KEY})),
+            (200, json!({"SecretString": SIGNING_KEY})),
+            (
+                400,
+                json!({"__type": "ResourceExistsException", "Message": "exists"}),
+            ),
+            (
+                200,
+                json!({"ARN": AWS_SIG_ARN, "VersionId": AWS_NEXT_VERSION}),
+            ),
+            (200, json!({})),
+            (200, json!({"SecretString": ENV_KEY})),
+        ]);
+        let mut store = aws_test_store(&root.0, &endpoint);
+        let mut keys = KeysFile::default();
+        keys.encryption_keys
+            .insert("development".into(), ENV_KEY.into());
+        keys.signature_keys.insert("/".into(), SIGNING_KEY.into());
+        store
+            .create(&keys, "workspace", Some(AWS_REGION))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .create(&keys, "workspace", Some(AWS_REGION))
+                .await
+                .is_err()
+        );
+        let refs = store.read_references().unwrap();
+        assert_eq!(refs.provider_location, AWS_REGION);
+        assert_eq!(
+            refs.encryption_keys["development"],
+            format!("{AWS_ENV_ARN}#{AWS_VERSION}")
+        );
+        let content = std::fs::read_to_string(&store.path).unwrap();
+        assert!(!content.contains(ENV_KEY) && !content.contains(SIGNING_KEY));
+        assert!(!root.0.join(".ramenv.keys").exists());
+        let loaded = store.load().await.unwrap();
+        assert_eq!(loaded.encryption_keys, keys.encryption_keys);
+        assert_eq!(loaded.signature_keys, keys.signature_keys);
+
+        keys.signature_keys.insert("/".into(), ENV_KEY.into());
+        keys.encryption_keys.shift_remove("development");
+        store
+            .save(
+                &keys,
+                "workspace",
+                &IndexMap::from([
+                    (KeyId::Signature("/".into()), Change::Upsert),
+                    (KeyId::Encryption("development".into()), Change::Remove),
+                ]),
+            )
+            .await
+            .unwrap();
+        let refs = store.read_references().unwrap();
+        assert!(refs.encryption_keys.is_empty());
+        assert_eq!(
+            refs.signature_keys["/"],
+            format!("{AWS_SIG_ARN}#{AWS_NEXT_VERSION}")
+        );
+        assert_eq!(store.load().await.unwrap().signature_keys["/"], ENV_KEY);
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 8);
+        assert_eq!(
+            requests[0].1["Name"],
+            secret_name("workspace", "encryption", "development")
+        );
+        assert_eq!(requests[2].1["VersionId"], AWS_VERSION);
+        assert!(requests[5].0.ends_with("putsecretvalue"));
+        assert_eq!(requests[5].1["SecretString"], ENV_KEY);
+        assert!(requests[6].0.ends_with("deletesecret"));
+        assert_eq!(requests[6].1["SecretId"], AWS_ENV_ARN);
+        assert!(requests[6].1.get("ForceDeleteWithoutRecovery").is_none());
+    }
+
+    #[tokio::test]
+    async fn aws_store_preserves_references_when_remote_write_fails() {
+        let root = TempDir::new("aws-error");
+        let (endpoint, server) = aws_server(vec![(
+            400,
+            serde_json::json!({
+                "__type": "AccessDeniedException", "Message": "denied"
+            }),
+        )]);
+        let mut store = aws_test_store(&root.0, &endpoint);
+        let mut refs = models::KeysReferenceFile::new(AWS_REGION.into());
+        refs.signature_keys
+            .insert("/".into(), format!("{AWS_SIG_ARN}#{AWS_VERSION}"));
+        store.write_references(&refs, true).unwrap();
+        let before = std::fs::read_to_string(&store.path).unwrap();
+        let mut keys = KeysFile::default();
+        keys.signature_keys.insert("/".into(), ENV_KEY.into());
+        assert!(
+            store
+                .save(
+                    &keys,
+                    "workspace",
+                    &IndexMap::from([(KeyId::Signature("/".into()), Change::Upsert),])
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[derive(Debug, Default)]
+    struct GoogleSecretsMock {
+        secrets: std::sync::Mutex<IndexMap<String, Vec<String>>>,
+        fail_writes: std::sync::atomic::AtomicBool,
+    }
+
+    fn google_error(code: Code) -> google_cloud_gax::error::Error {
+        google_cloud_gax::error::Error::service(
+            google_cloud_gax::error::rpc::Status::default().set_code(code),
+        )
+    }
+
+    fn google_response<T>(body: T) -> google_cloud_gax::response::Response<T> {
+        google_cloud_gax::response::Response::from_parts(Default::default(), body)
+    }
+
+    impl google_cloud_secretmanager_v1::stub::SecretManagerService for GoogleSecretsMock {
+        async fn create_secret(
+            &self,
+            req: google_cloud_secretmanager_v1::model::CreateSecretRequest,
+            _: google_cloud_gax::options::RequestOptions,
+        ) -> google_cloud_secretmanager_v1::Result<google_cloud_gax::response::Response<Secret>>
+        {
+            assert!(req.secret.as_ref().unwrap().replication.is_some());
+            let name = format!("{}/secrets/{}", req.parent, req.secret_id);
+            let mut secrets = self.secrets.lock().unwrap();
+            if secrets.contains_key(&name) {
+                return Err(google_error(Code::AlreadyExists));
+            }
+            secrets.insert(name.clone(), Vec::new());
+            Ok(google_response(Secret::new().set_name(name)))
+        }
+
+        async fn add_secret_version(
+            &self,
+            req: google_cloud_secretmanager_v1::model::AddSecretVersionRequest,
+            _: google_cloud_gax::options::RequestOptions,
+        ) -> google_cloud_secretmanager_v1::Result<
+            google_cloud_gax::response::Response<
+                google_cloud_secretmanager_v1::model::SecretVersion,
+            >,
+        > {
+            if self.fail_writes.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(google_error(Code::PermissionDenied));
+            }
+            let mut secrets = self.secrets.lock().unwrap();
+            let versions = secrets.get_mut(&req.parent).unwrap();
+            versions.push(String::from_utf8(req.payload.unwrap().data.to_vec()).unwrap());
+            Ok(google_response(
+                google_cloud_secretmanager_v1::model::SecretVersion::new().set_name(format!(
+                    "{}/versions/{}",
+                    req.parent,
+                    versions.len()
+                )),
+            ))
+        }
+
+        async fn access_secret_version(
+            &self,
+            req: google_cloud_secretmanager_v1::model::AccessSecretVersionRequest,
+            _: google_cloud_gax::options::RequestOptions,
+        ) -> google_cloud_secretmanager_v1::Result<
+            google_cloud_gax::response::Response<
+                google_cloud_secretmanager_v1::model::AccessSecretVersionResponse,
+            >,
+        > {
+            let (name, version) = req.name.rsplit_once("/versions/").unwrap();
+            let version: usize = version.parse().unwrap();
+            let secrets = self.secrets.lock().unwrap();
+            let value = &secrets[name][version - 1];
+            Ok(google_response(
+                google_cloud_secretmanager_v1::model::AccessSecretVersionResponse::new()
+                    .set_name(req.name.clone())
+                    .set_payload(SecretPayload::new().set_data(value.clone().into_bytes())),
+            ))
+        }
+
+        async fn delete_secret(
+            &self,
+            req: google_cloud_secretmanager_v1::model::DeleteSecretRequest,
+            _: google_cloud_gax::options::RequestOptions,
+        ) -> google_cloud_secretmanager_v1::Result<google_cloud_gax::response::Response<()>>
+        {
+            if self
+                .secrets
+                .lock()
+                .unwrap()
+                .shift_remove(&req.name)
+                .is_none()
+            {
+                return Err(google_error(Code::NotFound));
+            }
+            Ok(google_response(()))
+        }
+    }
+
+    fn google_test_store(root: &Path) -> (GoogleKeyStore, std::sync::Arc<GoogleSecretsMock>) {
+        let mock = std::sync::Arc::new(GoogleSecretsMock::default());
+        let store = GoogleKeyStore {
+            path: root.join(".ramenv.keyrefs.toml"),
+            client: SecretManagerService::from_stub::<GoogleSecretsMock>(mock.clone()),
+        };
+        (store, mock)
+    }
+
+    #[tokio::test]
+    async fn google_store_creates_loads_updates_and_removes_versioned_keys() {
+        let root = TempDir::new("google-store");
+        let (mut store, mock) = google_test_store(&root.0);
+        let mut keys = KeysFile::default();
+        keys.encryption_keys
+            .insert("development".into(), ENV_KEY.into());
+        keys.signature_keys.insert("/".into(), SIGNING_KEY.into());
+        store
+            .create(&keys, "workspace", Some("test-project"))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .create(&keys, "workspace", Some("test-project"))
+                .await
+                .is_err()
+        );
+        let refs = store.read_references().unwrap();
+        assert_eq!(refs.provider_location, "projects/test-project");
+        assert!(refs.encryption_keys["development"].ends_with("/versions/1"));
+        let content = std::fs::read_to_string(&store.path).unwrap();
+        assert!(!content.contains(ENV_KEY) && !content.contains(SIGNING_KEY));
+        assert!(!root.0.join(".ramenv.keys").exists());
+        let loaded = store.load().await.unwrap();
+        assert_eq!(loaded.encryption_keys, keys.encryption_keys);
+        assert_eq!(loaded.signature_keys, keys.signature_keys);
+        let old_signing_ref = refs.signature_keys["/"].clone();
+
+        keys.signature_keys.insert("/".into(), ENV_KEY.into());
+        keys.encryption_keys.shift_remove("development");
+        store
+            .save(
+                &keys,
+                "workspace",
+                &IndexMap::from([
+                    (KeyId::Signature("/".into()), Change::Upsert),
+                    (KeyId::Encryption("development".into()), Change::Remove),
+                ]),
+            )
+            .await
+            .unwrap();
+        let refs = store.read_references().unwrap();
+        assert!(refs.encryption_keys.is_empty());
+        assert!(refs.signature_keys["/"].ends_with("/versions/2"));
+        assert_eq!(
+            store
+                .read_key(&old_signing_ref, "projects/test-project")
+                .await
+                .unwrap(),
+            SIGNING_KEY
+        );
+        assert_eq!(store.load().await.unwrap().signature_keys["/"], ENV_KEY);
+        assert_eq!(mock.secrets.lock().unwrap().len(), 1);
+        // Repeated removal of a remotely missing key is idempotent.
+        store
+            .delete_key(
+                "projects/test-project/secrets/missing/versions/1",
+                "projects/test-project",
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn google_store_preserves_references_when_remote_write_fails() {
+        let root = TempDir::new("google-error");
+        let (mut store, mock) = google_test_store(&root.0);
+        let mut keys = KeysFile::default();
+        keys.signature_keys.insert("/".into(), SIGNING_KEY.into());
+        store
+            .create(&keys, "workspace", Some("test-project"))
+            .await
+            .unwrap();
+        let before = std::fs::read_to_string(&store.path).unwrap();
+        mock.fail_writes
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        keys.signature_keys.insert("/".into(), ENV_KEY.into());
+        assert!(
+            store
+                .save(
+                    &keys,
+                    "workspace",
+                    &IndexMap::from([(KeyId::Signature("/".into()), Change::Upsert),])
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+        assert_eq!(store.load().await.unwrap().signature_keys["/"], SIGNING_KEY);
+    }
+
+    #[tokio::test]
+    async fn cloud_stores_reject_missing_files_and_invalid_locations_without_cloud_calls() {
+        let aws_root = TempDir::new("aws-invalid");
+        let google_root = TempDir::new("google-invalid");
+        let mut aws = aws_test_store(&aws_root.0, "http://127.0.0.1:1");
+        let (mut google, mock) = google_test_store(&google_root.0);
+        assert!(aws.load().await.is_err());
+        assert!(google.load().await.is_err());
+        let keys = KeysFile::default();
+        for location in [None, Some(""), Some("https://example.com")] {
+            assert!(aws.create(&keys, "workspace", location).await.is_err());
+            assert!(google.create(&keys, "workspace", location).await.is_err());
+        }
+        assert!(!aws.path.exists());
+        assert!(!google.path.exists());
+        assert!(mock.secrets.lock().unwrap().is_empty());
+        std::fs::write(&aws.path, "invalid = [toml").unwrap();
+        std::fs::write(&google.path, "invalid = [toml").unwrap();
+        assert!(aws.load().await.is_err());
+        assert!(google.load().await.is_err());
+    }
+
+    #[test]
+    fn cloud_locations_and_versioned_references_are_validated() {
+        assert_eq!(AwsKeyStore::region(" us-east-1 ").unwrap(), AWS_REGION);
+        for invalid in ["", "https://example.com", "invalid", "US-EAST-1"] {
+            assert!(AwsKeyStore::region(invalid).is_err());
+        }
+        let reference = format!("{AWS_ENV_ARN}#{AWS_VERSION}");
+        assert_eq!(
+            AwsKeyStore::secret_reference(&reference, AWS_REGION).unwrap(),
+            (AWS_ENV_ARN, AWS_VERSION)
+        );
+        assert!(AwsKeyStore::secret_reference(&reference, "eu-west-1").is_err());
+        for invalid in [
+            AWS_ENV_ARN,
+            "not-an-arn#version",
+            "arn:aws:s3:us-east-1:123456789012:secret:name#version",
+        ] {
+            assert!(AwsKeyStore::secret_reference(invalid, AWS_REGION).is_err());
+        }
+        assert_eq!(
+            GoogleKeyStore::project("test-project").unwrap(),
+            "projects/test-project"
+        );
+        assert_eq!(
+            GoogleKeyStore::project("projects/test-project").unwrap(),
+            "projects/test-project"
+        );
+        for invalid in [
+            "",
+            "projects/",
+            "projects/a/secrets/b",
+            "https://example.com",
+        ] {
+            assert!(GoogleKeyStore::project(invalid).is_err());
+        }
+        let reference = "projects/test-project/secrets/key/versions/1";
+        assert_eq!(
+            GoogleKeyStore::secret_reference(reference, "projects/test-project").unwrap(),
+            "projects/test-project/secrets/key"
+        );
+        assert!(GoogleKeyStore::secret_reference(reference, "projects/other-project").is_err());
+        for invalid in [
+            "projects/test-project/secrets/key",
+            "projects/test-project/secrets/key/versions/latest",
+            "projects/test-project/secrets/key/versions/0",
+        ] {
+            assert!(GoogleKeyStore::secret_reference(invalid, "projects/test-project").is_err());
+        }
     }
 
     fn write_keys(root: &Path) {

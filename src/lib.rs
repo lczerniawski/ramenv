@@ -188,6 +188,14 @@ async fn execute_runtime_command(command: Cli, current_working_path: &Path) -> R
             let store = services::AzureKeyStore::new(&root, credential);
             execute_with_store(command, current_working_path, workspace_registry, store).await
         }
+        models::Provider::Aws => {
+            let store = services::AwsKeyStore::new(&root).await;
+            execute_with_store(command, current_working_path, workspace_registry, store).await
+        }
+        models::Provider::Google => {
+            let store = services::GoogleKeyStore::new(&root).await?;
+            execute_with_store(command, current_working_path, workspace_registry, store).await
+        }
     }
 }
 

@@ -28,6 +28,20 @@ fn root_help_and_version_are_available_without_a_workspace() {
 }
 
 #[test]
+fn cloud_ingredients_are_exposed_in_help_and_menu() {
+    for args in [vec!["init", "workspace", "--help"], vec!["menu"]] {
+        let output = run(&args);
+        assert!(output.status.success(), "{}", stderr(&output));
+        for provider in ["local", "azure", "aws", "google"] {
+            assert!(
+                stdout(&output).contains(provider),
+                "missing {provider} for {args:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn every_subcommand_exposes_help_without_touching_the_filesystem() {
     for command in [
         "init",

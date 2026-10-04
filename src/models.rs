@@ -23,15 +23,15 @@ impl Default for KeysFile {
 pub struct KeysReferenceFile {
     pub encryption_keys: IndexMap<String, String>,
     pub signature_keys: IndexMap<String, String>,
-    pub provider_url: String,
+    pub provider_location: String,
 }
 
 impl KeysReferenceFile {
-    pub fn new(provider_url: String) -> Self {
+    pub fn new(provider_location: String) -> Self {
         Self {
             encryption_keys: IndexMap::new(),
             signature_keys: IndexMap::new(),
-            provider_url,
+            provider_location,
         }
     }
 }
@@ -97,8 +97,8 @@ impl WorkspaceFile {
 pub enum Provider {
     Local,
     Azure,
-    // Google,
-    // Aws,
+    Google,
+    Aws,
 }
 
 #[cfg(test)]
@@ -119,6 +119,16 @@ mod tests {
         assert_eq!(vault.metadata.signed_at, "");
         toml::to_string(&keys).unwrap();
         toml::to_string(&vault).unwrap();
+    }
+
+    #[test]
+    fn cloud_providers_round_trip_in_workspace_files() {
+        for provider in [Provider::Azure, Provider::Aws, Provider::Google] {
+            let workspace = WorkspaceFile::new("1".into(), "test".into(), provider.clone());
+            let serialized = toml::to_string(&workspace).unwrap();
+            let reloaded: WorkspaceFile = toml::from_str(&serialized).unwrap();
+            assert_eq!(reloaded.ingredient, provider);
+        }
     }
 
     #[test]
