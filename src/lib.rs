@@ -1,11 +1,14 @@
 use std::path::Path;
 use std::process::exit;
 
+use anyhow::Context;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use env_logger::Env;
 use log::error;
 use services::WorkspaceService;
+use std::io::IsTerminal;
+use std::path::Component;
 
 use crate::models::Provider;
 use crate::services::EncryptionKeyService;
@@ -42,7 +45,7 @@ enum Cli {
     Onboard(OnboardArgs),
     /// Create a new environment
     CreateEnv(CreateEnvArgs),
-    /// Remove an environment
+    /// Remove an environment from every registered vault in the workspace
     RemoveEnv(RemoveEnvArgs),
     /// Securely add or update a value directly inside the vault file
     Set(SetArgs),
@@ -56,7 +59,7 @@ enum Cli {
     Diff(DiffArgs),
     /// Decrypt secrets in memory and execute an application process
     Run(RunArgs),
-    /// Rotate the master encryption key and re-encrypt the file
+    /// Rotate the shared encryption key and re-encrypt every registered workspace vault
     Rotate(RotateArgs),
 }
 
@@ -89,6 +92,9 @@ struct CreateEnvArgs {
 struct RemoveEnvArgs {
     /// Name of the environment to remove
     env: String,
+    /// Confirm removal from all affected workspace vaults without prompting
+    #[arg(short = 'y', long)]
+    yes: bool,
 }
 
 #[derive(Args, Debug)]
@@ -148,6 +154,9 @@ struct RunArgs {
 struct RotateArgs {
     /// Environment to rotate
     env: String,
+    /// Confirm rotation across all affected workspace vaults without prompting
+    #[arg(short = 'y', long)]
+    yes: bool,
 }
 
 pub async fn run_cli() {
@@ -207,6 +216,50 @@ async fn execute_with_store<S: services::KeyStore>(
 ) -> Result<()> {
     let mut key_service = services::KeyService::from_store(store).await?;
     let root = workspace_registry.get_workspace_root();
+    if matches!(command, Cli::Rotate(_) | Cli::RemoveEnv(_)) {
+        let mut vaults = load_workspace_vaults(&root, &key_service)?;
+        let (action, environment, yes) = match &command {
+            Cli::Rotate(args) => ("rotate", args.env.as_str(), args.yes),
+            Cli::RemoveEnv(args) => ("remove-env", args.env.as_str(), args.yes),
+            _ => unreachable!(),
+        };
+        key_service.env_key(environment)?;
+        let affected: Vec<_> = key_service
+            .vault_names()
+            .zip(&vaults)
+            .filter(|(_, vault)| services::VaultService::env_vault(*vault, environment).is_ok())
+            .map(|(name, _)| name)
+            .collect();
+        confirm_workspace_change(
+            action,
+            environment,
+            yes,
+            vaults.len(),
+            &affected,
+            prompt_workspace_confirmation,
+        )?;
+        return match command {
+            Cli::Rotate(args) => {
+                commands::rotate_command(
+                    &args.env,
+                    &mut key_service,
+                    &mut vaults,
+                    &workspace_registry,
+                )
+                .await
+            }
+            Cli::RemoveEnv(args) => {
+                commands::remove_env_command(
+                    &args.env,
+                    &mut key_service,
+                    &mut vaults,
+                    &workspace_registry,
+                )
+                .await
+            }
+            _ => unreachable!(),
+        };
+    }
     let vault_path = current_working_path
         .strip_prefix(&root)?
         .to_str()
@@ -236,15 +289,6 @@ async fn execute_with_store<S: services::KeyStore>(
             )
             .await
         }
-        Cli::RemoveEnv(args) => {
-            commands::remove_env_command(
-                &args.env,
-                &mut key_service,
-                &mut vault_registry,
-                &workspace_registry,
-            )
-            .await
-        }
         Cli::Set(args) => commands::set_command(
             &args.env,
             &args.key,
@@ -267,17 +311,94 @@ async fn execute_with_store<S: services::KeyStore>(
         Cli::Run(args) => {
             commands::run_command(&args.env, &args.command, &key_service, &vault_registry)
         }
-        Cli::Rotate(args) => {
-            commands::rotate_command(
-                &args.env,
-                &mut key_service,
-                &mut vault_registry,
-                &workspace_registry,
-            )
-            .await
+        Cli::Menu | Cli::Init { .. } | Cli::Rotate(_) | Cli::RemoveEnv(_) => {
+            unreachable!("handled before loading the current vault")
         }
-        Cli::Menu | Cli::Init { .. } => unreachable!("handled before runtime services are loaded"),
     }
+}
+
+fn confirm_workspace_change(
+    action: &str,
+    environment: &str,
+    yes: bool,
+    registered_count: usize,
+    affected: &[&str],
+    prompt: impl FnOnce(&str) -> Result<bool>,
+) -> Result<()> {
+    if yes || registered_count <= 1 || affected.is_empty() {
+        return Ok(());
+    }
+
+    let scope = match action {
+        "remove-env" => format!(
+            "Remove environment '{environment}' from all {} affected workspace vault(s) and delete its shared encryption key?",
+            affected.len()
+        ),
+        "rotate" => format!(
+            "Rotate the shared encryption key for environment '{environment}' and re-encrypt all {} affected workspace vault(s)?",
+            affected.len()
+        ),
+        _ => unreachable!("only workspace mutations require confirmation"),
+    };
+    println!("{scope}\nAffected vaults:");
+    for name in affected {
+        println!("  - {name}");
+    }
+    if !prompt("Proceed with this workspace-wide change?")? {
+        anyhow::bail!("operation cancelled; no changes were made");
+    }
+    Ok(())
+}
+
+fn prompt_workspace_confirmation(message: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!(
+            "workspace-wide changes require confirmation; rerun with --yes (or -y) for non-interactive use"
+        );
+    }
+    Ok(inquire::Confirm::new(message)
+        .with_default(false)
+        .prompt()?)
+}
+
+fn load_workspace_vaults<S: services::KeyStore>(
+    root: &Path,
+    keys: &services::KeyService<S>,
+) -> Result<Vec<services::VaultRegistry>> {
+    let root = root
+        .canonicalize()
+        .context("failed to locate workspace root")?;
+    keys.vault_names()
+        .map(|name| {
+            let path = if name == "/" {
+                root.to_path_buf()
+            } else {
+                let relative = Path::new(name);
+                if relative.as_os_str().is_empty()
+                    || !relative
+                        .components()
+                        .all(|part| matches!(part, Component::Normal(_)))
+                {
+                    anyhow::bail!("invalid registered vault path: {name}");
+                }
+                root.join(relative)
+            };
+            let canonical = path
+                .canonicalize()
+                .with_context(|| format!("failed to locate registered vault {name}"))?;
+            if !canonical.starts_with(&root)
+                || !canonical
+                    .join(".ramenv.vault.toml")
+                    .canonicalize()
+                    .with_context(|| format!("failed to locate vault file for {name}"))?
+                    .starts_with(&root)
+            {
+                anyhow::bail!("registered vault {name} is outside the workspace");
+            }
+            services::VaultRegistry::load(&canonical, keys.vault_signature_key(name)?)
+                .with_context(|| format!("failed to load registered vault {name}"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -307,6 +428,66 @@ mod tests {
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn workspace_confirmation_requires_acceptance_and_propagates_prompt_errors() {
+        for action in ["rotate", "remove-env"] {
+            let affected = ["services/api", "services/web"];
+            let accepted =
+                confirm_workspace_change(action, "development", false, 3, &affected, |message| {
+                    assert_eq!(message, "Proceed with this workspace-wide change?");
+                    Ok(true)
+                });
+            assert!(accepted.is_ok());
+            let declined =
+                confirm_workspace_change(action, "development", false, 3, &affected, |_| Ok(false));
+            assert_eq!(
+                declined.unwrap_err().to_string(),
+                "operation cancelled; no changes were made"
+            );
+            let interrupted =
+                confirm_workspace_change(action, "development", false, 3, &affected, |_| {
+                    anyhow::bail!("prompt interrupted")
+                });
+            assert_eq!(interrupted.unwrap_err().to_string(), "prompt interrupted");
+        }
+    }
+
+    #[test]
+    fn workspace_confirmation_is_skipped_only_for_explicit_consent_or_no_shared_scope() {
+        for action in ["rotate", "remove-env"] {
+            for (yes, registered, affected) in [
+                (true, 3, vec!["services/api", "services/web"]),
+                (false, 1, vec!["/"]),
+                (false, 3, vec![]),
+            ] {
+                confirm_workspace_change(action, "development", yes, registered, &affected, |_| {
+                    panic!("unexpected confirmation for yes={yes}, registered={registered}")
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_mutations_accept_long_and_short_consent_flags() {
+        for command in ["rotate", "remove-env"] {
+            for flag in [None, Some("--yes"), Some("-y")] {
+                let mut args = vec!["ramenv", command, "development"];
+                if let Some(flag) = flag {
+                    args.push(flag);
+                }
+                let parsed = Cli::try_parse_from(args).unwrap();
+                let (environment, yes) = match parsed {
+                    Cli::Rotate(args) => (args.env, args.yes),
+                    Cli::RemoveEnv(args) => (args.env, args.yes),
+                    _ => unreachable!(),
+                };
+                assert_eq!(environment, "development");
+                assert_eq!(yes, flag.is_some());
+            }
         }
     }
 

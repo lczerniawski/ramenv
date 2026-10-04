@@ -42,7 +42,15 @@ pub fn run_command(
         exit(code);
     }
 
-    Ok(())
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            exit(128 + signal);
+        }
+    }
+
+    anyhow::bail!("command terminated without an exit code")
 }
 
 #[cfg(test)]

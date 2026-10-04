@@ -61,6 +61,9 @@ fn encode_bytes(bytes: Vec<u8>) -> String {
 }
 
 fn decode_hex(hex_str: &str) -> Result<Vec<u8>> {
+    if !hex_str.is_ascii() {
+        anyhow::bail!("hex input must contain only ASCII hexadecimal characters");
+    }
     if !hex_str.len().is_multiple_of(2) {
         anyhow::bail!("hex input must contain an even number of characters");
     }
@@ -177,6 +180,21 @@ mod tests {
             };
             assert!(decrypt_value(&format!("secret:{odd_or_invalid}"), KEY).is_err());
             assert!(verify_signature("value", &odd_or_invalid, KEY).is_err());
+        }
+    }
+
+    #[test]
+    fn unicode_hex_is_rejected_by_all_crypto_entry_points() {
+        let ciphertext = encrypt_value("value", KEY).unwrap();
+        let signature = generate_signature("value", KEY).unwrap();
+        for malformed in ["a€", "a🦀a", "é", "😀", "００", "a\u{0301}a"] {
+            assert!(decode_hex(malformed).is_err());
+            assert!(encrypt_value("value", malformed).is_err());
+            assert!(decrypt_value(&ciphertext, malformed).is_err());
+            assert!(decrypt_value(&format!("secret:{malformed}"), KEY).is_err());
+            assert!(generate_signature("value", malformed).is_err());
+            assert!(verify_signature("value", malformed, KEY).is_err());
+            assert!(verify_signature("value", &signature, malformed).is_err());
         }
     }
 

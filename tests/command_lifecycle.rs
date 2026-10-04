@@ -261,6 +261,60 @@ fn delete_removes_the_value_and_its_validation_rule() {
 }
 
 #[test]
+fn deleting_a_key_preserves_validation_in_other_environments() {
+    let workspace = Workspace::new();
+    write_fixture(
+        &workspace.0,
+        IndexMap::from([
+            ("API_KEY".into(), "true".into()),
+            ("PLAIN".into(), "kept".into()),
+        ]),
+    );
+    let mut vault = read_vault(&workspace.0);
+    vault.environments.insert(
+        "production".into(),
+        IndexMap::from([
+            ("API_KEY".into(), "invalid-boolean".into()),
+            ("PLAIN".into(), "kept".into()),
+        ]),
+    );
+    vault.validation["API_KEY"] = ValidationRule::new(RuleType::Boolean, true);
+    let mut keys = read_keys(&workspace.0);
+    keys.encryption_keys.insert("production".into(), KEY.into());
+    std::fs::write(
+        workspace.0.join(".ramenv.keys"),
+        toml::to_string(&keys).unwrap(),
+    )
+    .unwrap();
+    let canonical = serde_json::to_string(&CanonicalVault {
+        environments: vault.environments.clone(),
+    })
+    .unwrap();
+    vault.metadata.signature = crypto::generate_signature(&canonical, SIGNING_KEY).unwrap();
+    std::fs::write(
+        workspace.0.join(".ramenv.vault.toml"),
+        toml::to_string(&vault).unwrap(),
+    )
+    .unwrap();
+
+    assert_success(&run(&workspace.0, &["delete", "development", "API_KEY"]));
+    let after = read_vault(&workspace.0);
+    assert!(!after.environments["development"].contains_key("API_KEY"));
+    assert_eq!(
+        after.environments["production"]["API_KEY"],
+        "invalid-boolean"
+    );
+    assert!(matches!(
+        after.validation["API_KEY"].rule_type,
+        RuleType::Boolean
+    ));
+    assert_valid_signature(&after, SIGNING_KEY);
+    let validation = run(&workspace.0, &["validate", "production"]);
+    assert_eq!(validation.status.code(), Some(1));
+    assert!(stderr(&validation).contains("Key 'API_KEY' must be a boolean"));
+}
+
+#[test]
 fn rotate_reencrypts_secrets_but_preserves_plain_values() {
     let workspace = Workspace::new();
     let encrypted = crypto::encrypt_value("super-secret-token", KEY).unwrap();

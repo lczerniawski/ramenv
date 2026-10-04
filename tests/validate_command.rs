@@ -195,6 +195,117 @@ fn run_validate_case(
 }
 
 #[test]
+fn encrypted_validation_failures_do_not_expose_values() {
+    let cases = [
+        (
+            RuleType::Integer {
+                min_value: None,
+                max_value: None,
+            },
+            "sensitive-invalid-integer",
+        ),
+        (
+            RuleType::Integer {
+                min_value: Some(100000),
+                max_value: None,
+            },
+            "98765",
+        ),
+        (
+            RuleType::Integer {
+                min_value: None,
+                max_value: Some(1),
+            },
+            "98765",
+        ),
+        (
+            RuleType::Float {
+                min_value: None,
+                max_value: None,
+            },
+            "sensitive-invalid-float",
+        ),
+        (
+            RuleType::Float {
+                min_value: Some(100000.0),
+                max_value: None,
+            },
+            "98765.4321",
+        ),
+        (
+            RuleType::Float {
+                min_value: None,
+                max_value: Some(1.0),
+            },
+            "98765.4321",
+        ),
+        (RuleType::Boolean, "sensitive-invalid-boolean"),
+        (RuleType::Port, "sensitive-invalid-port"),
+        (RuleType::Uri, "sensitive-invalid-uri"),
+        (RuleType::IP, "sensitive-invalid-ip"),
+        (RuleType::Email, "sensitive-invalid-email"),
+        (
+            RuleType::Regex {
+                pattern: "^allowed$".into(),
+            },
+            "sensitive-pattern-mismatch",
+        ),
+    ];
+    for (rule, plaintext) in cases {
+        let workspace = Workspace::new();
+        write_workspace_file(workspace.path());
+        write_keys_file(workspace.path(), &[("development", KEY_HEX)]);
+        write_vault_file(
+            workspace.path(),
+            &[("SECRET", ValidationRule::new(rule, true))],
+            &[(
+                "development",
+                vec![("SECRET", crypto::encrypt_value(plaintext, KEY_HEX).unwrap())],
+            )],
+        );
+        for env in [Some("development"), None] {
+            let output = run_validate(workspace.path(), env);
+            assert_failure(&output);
+            let diagnostic = stderr(&output);
+            assert!(diagnostic.contains("[development] Key 'SECRET'"));
+            assert!(
+                !diagnostic.contains(plaintext),
+                "secret leaked: {diagnostic}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(plaintext));
+        }
+    }
+}
+
+#[test]
+fn validate_command_rejects_non_finite_encrypted_floats() {
+    for value in ["NaN", "inf", "-inf"] {
+        for bounds in [(None, None), (Some(0.0), Some(1.0))] {
+            run_validate_case(
+                Some("development"),
+                vec![("development", KEY_HEX)],
+                vec![(
+                    "RATE",
+                    ValidationRule::new(
+                        RuleType::Float {
+                            min_value: bounds.0,
+                            max_value: bounds.1,
+                        },
+                        true,
+                    ),
+                )],
+                vec![(
+                    "development",
+                    vec![("RATE", crypto::encrypt_value(value, KEY_HEX).unwrap())],
+                )],
+                false,
+                Some("[development] Key 'RATE' must be a finite float"),
+            );
+        }
+    }
+}
+
+#[test]
 fn validate_command_succeeds_for_selected_env() {
     let secret = crypto::encrypt_value("secret-value", KEY_HEX).expect("encrypt");
     run_validate_case(
@@ -409,7 +520,7 @@ fn validate_command_logs_integer_failure() {
         )],
         vec![("development", vec![("PORT", "not-an-integer".to_string())])],
         false,
-        Some("[development] Key 'PORT must be an integer, got: 'not-an-integer'"),
+        Some("[development] Key 'PORT' must be an integer"),
     );
 }
 
@@ -451,7 +562,7 @@ fn validate_command_logs_integer_below_min_value() {
         )],
         vec![("development", vec![("PORT", "9".to_string())])],
         false,
-        Some("[development] Key 'PORT' value 9 is too small (min: 10)"),
+        Some("[development] Key 'PORT' is too small (min: 10)"),
     );
 }
 
@@ -493,7 +604,7 @@ fn validate_command_logs_integer_above_max_value() {
         )],
         vec![("development", vec![("PORT", "11".to_string())])],
         false,
-        Some("[development] Key 'PORT' value 11 is too large (max: 10)"),
+        Some("[development] Key 'PORT' is too large (max: 10)"),
     );
 }
 
@@ -514,7 +625,7 @@ fn validate_command_logs_float_failure() {
         )],
         vec![("development", vec![("RATE", "not-a-float".to_string())])],
         false,
-        Some("[development] Key 'RATE' must be a float, got: 'not-a-float'"),
+        Some("[development] Key 'RATE' must be a float"),
     );
 }
 
@@ -556,7 +667,7 @@ fn validate_command_logs_float_below_min_value() {
         )],
         vec![("development", vec![("RATE", "1.4".to_string())])],
         false,
-        Some("[development] Key 'RATE' value 1.4 is too small (min: 1.5)"),
+        Some("[development] Key 'RATE' is too small (min: 1.5)"),
     );
 }
 
@@ -598,7 +709,7 @@ fn validate_command_logs_float_above_max_value() {
         )],
         vec![("development", vec![("RATE", "2.6".to_string())])],
         false,
-        Some("[development] Key 'RATE' value 2.6 is too large (max: 2.5)"),
+        Some("[development] Key 'RATE' is too large (max: 2.5)"),
     );
 }
 
@@ -610,7 +721,7 @@ fn validate_command_logs_boolean_failure() {
         vec![("FLAG", ValidationRule::new(RuleType::Boolean, true))],
         vec![("development", vec![("FLAG", "not-bool".to_string())])],
         false,
-        Some("[development] Key 'FLAG' must be a boolean (true/false), got: 'not-bool'"),
+        Some("[development] Key 'FLAG' must be a boolean (true/false)"),
     );
 }
 
@@ -646,7 +757,7 @@ fn validate_command_logs_port_failure_when_above_65535() {
         vec![("PORT", ValidationRule::new(RuleType::Port, true))],
         vec![("development", vec![("PORT", "65536".to_string())])],
         false,
-        Some("[development] Key 'PORT' must be a valid port number (0-65535), got: '65536'"),
+        Some("[development] Key 'PORT' must be a valid port number (0-65535)"),
     );
 }
 
@@ -670,7 +781,7 @@ fn validate_command_logs_uri_failure() {
         vec![("SITE_URL", ValidationRule::new(RuleType::Uri, true))],
         vec![("development", vec![("SITE_URL", "not-a-url".to_string())])],
         false,
-        Some("[development] Key 'SITE_URL' must be a valid URI/URL, got: 'not-a-url'"),
+        Some("[development] Key 'SITE_URL' must be a valid URI/URL"),
     );
 }
 
@@ -697,7 +808,7 @@ fn validate_command_logs_ip_failure() {
         vec![("HOST", ValidationRule::new(RuleType::IP, true))],
         vec![("development", vec![("HOST", "not-an-ip".to_string())])],
         false,
-        Some("[development] Key 'HOST' must be a valid IP address, got: 'not-an-ip'"),
+        Some("[development] Key 'HOST' must be a valid IP address"),
     );
 }
 
@@ -724,7 +835,7 @@ fn validate_command_logs_email_failure() {
             vec![("EMAIL", "missing-at-symbol".to_string())],
         )],
         false,
-        Some("[development] Key 'EMAIL' must be a valid email address, got: 'missing-at-symbol'"),
+        Some("[development] Key 'EMAIL' must be a valid email address"),
     );
 }
 
@@ -759,7 +870,7 @@ fn validate_command_logs_regex_mismatch() {
         )],
         vec![("development", vec![("CODE", "123".to_string())])],
         false,
-        Some("[development] Key 'CODE' does not match the required pattern, got: '123'"),
+        Some("[development] Key 'CODE' does not match the required pattern"),
     );
 }
 

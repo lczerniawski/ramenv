@@ -10,6 +10,7 @@ mod rotate;
 mod run;
 mod set;
 mod validate;
+mod workspace_change;
 
 pub use create_env::create_env_command;
 pub use delete::delete_command;
@@ -75,6 +76,7 @@ pub(super) mod test_support {
         pub signatures: IndexMap<String, String>,
         pub commits: Cell<usize>,
         pub fail_commit: bool,
+        pub fail_commit_at: Option<usize>,
     }
 
     impl Keys {
@@ -121,7 +123,7 @@ pub(super) mod test_support {
 
         async fn commit(&mut self, _workspace_name: &str) -> Result<()> {
             self.commits.set(self.commits.get() + 1);
-            if self.fail_commit {
+            if self.fail_commit || self.fail_commit_at == Some(self.commits.get()) {
                 anyhow::bail!("key commit failed");
             }
             Ok(())
@@ -134,6 +136,7 @@ pub(super) mod test_support {
         pub rules: IndexMap<String, ValidationRule>,
         pub commits: Cell<usize>,
         pub fail_commit: bool,
+        pub fail_commit_at: Option<usize>,
     }
 
     impl Vault {
@@ -188,7 +191,7 @@ pub(super) mod test_support {
 
         fn commit(&self) -> Result<()> {
             self.commits.set(self.commits.get() + 1);
-            if self.fail_commit {
+            if self.fail_commit || self.fail_commit_at == Some(self.commits.get()) {
                 anyhow::bail!("vault commit failed");
             }
             Ok(())

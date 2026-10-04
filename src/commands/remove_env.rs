@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log::info;
 
 use crate::services;
@@ -6,38 +6,34 @@ use crate::services;
 pub async fn remove_env_command(
     environment: &str,
     encryption_key_service: &mut impl services::EncryptionKeyService,
-    vault_service: &mut impl services::VaultService,
+    vaults: &mut [impl services::VaultService],
     workspace_service: &impl services::WorkspaceService,
 ) -> Result<()> {
-    let old_key = encryption_key_service
+    encryption_key_service
         .env_key(environment)
-        .map(str::to_owned)
         .map_err(|_| anyhow::anyhow!("key for provided environment does not exist"))?;
-    let old_vault = vault_service
-        .env_vault(environment)
-        .map_err(|_| anyhow::anyhow!("vault for provided environment does not exist"))?;
-
-    encryption_key_service.remove_env_key(environment);
-    vault_service.remove_env_vault(environment);
-    if let Err(error) = encryption_key_service
-        .commit(workspace_service.get_workspace_name())
-        .await
-    {
-        encryption_key_service.set_env_key(environment, old_key);
-        vault_service.set_env_vault(environment, old_vault);
-        return Err(error);
+    let originals = super::workspace_change::snapshots(environment, vaults);
+    if originals.is_empty() {
+        anyhow::bail!("vault for provided environment does not exist");
     }
-    if let Err(error) = vault_service.commit() {
-        encryption_key_service.set_env_key(environment, old_key);
-        vault_service.set_env_vault(environment, old_vault);
-        encryption_key_service
-            .commit(workspace_service.get_workspace_name())
-            .await
-            .context("failed to roll back key after vault commit failure")?;
-        return Err(error);
+    for (index, _) in &originals {
+        vaults[*index].remove_env_vault(environment);
     }
+    super::workspace_change::commit_change(
+        environment,
+        None,
+        encryption_key_service,
+        vaults,
+        &originals,
+        workspace_service,
+    )
+    .await?;
 
-    info!("✅ successfully removed environment: {}", environment);
+    info!(
+        "✅ successfully removed environment: {} from {} workspace vault(s)",
+        environment,
+        originals.len()
+    );
     Ok(())
 }
 
@@ -46,40 +42,65 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::*;
-    use crate::commands::test_support::{Keys, Vault, Workspace};
+    use crate::commands::test_support::{KEY, Keys, Vault, Workspace};
 
     #[tokio::test]
     async fn removes_existing_environment_from_both_services() {
         let mut keys = Keys::with_env("staging");
-        let mut vault = Vault::with_env("staging", IndexMap::new());
-        let workspace = Workspace::default();
-
-        remove_env_command("staging", &mut keys, &mut vault, &workspace)
+        let mut vaults = [Vault::with_env("staging", IndexMap::new())];
+        remove_env_command("staging", &mut keys, &mut vaults, &Workspace::default())
             .await
             .unwrap();
         assert!(!keys.values.contains_key("staging"));
-        assert!(!vault.environments.contains_key("staging"));
+        assert!(!vaults[0].environments.contains_key("staging"));
         assert_eq!(keys.commits.get(), 1);
-        assert_eq!(vault.commits.get(), 1);
+        assert_eq!(vaults[0].commits.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn removes_environment_from_all_vaults_and_preserves_other_state() {
+        let mut keys = Keys::with_env("staging");
+        keys.values.insert("prod".into(), KEY.into());
+        let mut vaults = [
+            Vault::with_env("staging", IndexMap::new()),
+            Vault::with_env("staging", IndexMap::new()),
+            Vault::with_env("prod", IndexMap::new()),
+        ];
+        vaults[0].environments.insert(
+            "prod".into(),
+            IndexMap::from([("KEEP".into(), "unchanged".into())]),
+        );
+        remove_env_command("staging", &mut keys, &mut vaults, &Workspace::default())
+            .await
+            .unwrap();
+        assert!(!keys.values.contains_key("staging"));
+        assert_eq!(keys.values["prod"], KEY);
+        assert!(
+            vaults
+                .iter()
+                .all(|vault| !vault.environments.contains_key("staging"))
+        );
+        assert_eq!(vaults[0].environments["prod"]["KEEP"], "unchanged");
+        assert_eq!(vaults[0].commits.get(), 1);
+        assert_eq!(vaults[1].commits.get(), 1);
+        assert_eq!(vaults[2].commits.get(), 0);
+        assert_eq!(keys.commits.get(), 1);
     }
 
     #[tokio::test]
     async fn rejects_missing_key_or_vault_before_committing() {
         let mut keys = Keys::default();
-        let mut vault = Vault::with_env("staging", IndexMap::new());
-        let workspace = Workspace::default();
+        let mut vaults = [Vault::with_env("staging", IndexMap::new())];
         assert!(
-            remove_env_command("staging", &mut keys, &mut vault, &workspace)
+            remove_env_command("staging", &mut keys, &mut vaults, &Workspace::default())
                 .await
                 .is_err()
         );
-        assert_eq!(vault.commits.get(), 0);
-
+        assert_eq!(vaults[0].commits.get(), 0);
         let mut keys = Keys::with_env("staging");
-        let mut vault = Vault::default();
-        let workspace = Workspace::default();
+        let mut vaults = [Vault::default()];
         assert!(
-            remove_env_command("staging", &mut keys, &mut vault, &workspace)
+            remove_env_command("staging", &mut keys, &mut vaults, &Workspace::default())
                 .await
                 .is_err()
         );
@@ -87,35 +108,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propagates_commit_failures() {
+    async fn rolls_back_vaults_before_deleting_key_when_a_commit_fails() {
+        let mut keys = Keys::with_env("staging");
+        let mut vaults = [
+            Vault::with_env("staging", IndexMap::new()),
+            Vault {
+                fail_commit_at: Some(1),
+                ..Vault::with_env("staging", IndexMap::new())
+            },
+        ];
+        let originals: Vec<_> = vaults
+            .iter()
+            .map(|vault| vault.environments.clone())
+            .collect();
+        assert!(
+            remove_env_command("staging", &mut keys, &mut vaults, &Workspace::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(keys.values["staging"], KEY);
+        assert_eq!(keys.commits.get(), 0);
+        for (vault, original) in vaults.iter().zip(originals) {
+            assert_eq!(vault.environments, original);
+            assert_eq!(vault.commits.get(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn restores_vault_order_and_key_when_key_commit_fails() {
         let mut keys = Keys {
-            fail_commit: true,
+            fail_commit_at: Some(1),
             ..Keys::with_env("staging")
         };
-        let mut vault = Vault::with_env("staging", IndexMap::new());
-        let workspace = Workspace::default();
-        assert!(
-            remove_env_command("staging", &mut keys, &mut vault, &workspace)
-                .await
-                .is_err()
-        );
-        assert_eq!(vault.commits.get(), 0);
-        assert!(keys.values.contains_key("staging"));
-        assert!(vault.environments.contains_key("staging"));
-
-        let mut keys = Keys::with_env("staging");
-        let mut vault = Vault {
-            fail_commit: true,
-            ..Vault::with_env("staging", IndexMap::from([("KEY".into(), "value".into())]))
-        };
-        let workspace = Workspace::default();
-        assert!(
-            remove_env_command("staging", &mut keys, &mut vault, &workspace)
-                .await
-                .is_err()
-        );
+        let mut vaults = [
+            Vault::with_env("staging", IndexMap::new()),
+            Vault::with_env("staging", IndexMap::new()),
+        ];
+        vaults[0]
+            .environments
+            .insert("prod".into(), IndexMap::new());
+        let originals: Vec<_> = vaults
+            .iter()
+            .map(|vault| vault.environments.clone())
+            .collect();
+        let error = remove_env_command("staging", &mut keys, &mut vaults, &Workspace::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "key commit failed");
+        assert_eq!(keys.values["staging"], KEY);
         assert_eq!(keys.commits.get(), 2);
-        assert!(keys.values.contains_key("staging"));
-        assert_eq!(vault.environments["staging"]["KEY"], "value");
+        for (vault, original) in vaults.iter().zip(originals) {
+            assert_eq!(vault.environments, original);
+            assert_eq!(
+                vault.environments.keys().collect::<Vec<_>>(),
+                original.keys().collect::<Vec<_>>()
+            );
+            assert_eq!(vault.commits.get(), 2);
+        }
     }
 }

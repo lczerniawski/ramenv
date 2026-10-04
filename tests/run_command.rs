@@ -210,6 +210,26 @@ fn run_command_fails_gracefully_when_binary_args_are_empty() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn run_command_reports_signal_termination_as_failure() {
+    let workspace = Workspace::new();
+    write_workspace_file(workspace.path());
+    write_keys_file(workspace.path(), &[("development", KEY_HEX)]);
+    write_vault_file(workspace.path(), &[("development", vec![])]);
+    for (signal, expected_code) in [("TERM", 143), ("KILL", 137)] {
+        let script = format!("kill -{signal} $$");
+        let output = run_execute(workspace.path(), "development", &["/bin/sh", "-c", &script]);
+        assert!(!output.status.success());
+        assert_eq!(
+            output.status.code(),
+            Some(expected_code),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
 #[test]
 fn run_command_propagates_the_child_exit_code() {
     let workspace = Workspace::new();

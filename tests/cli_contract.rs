@@ -97,12 +97,25 @@ fn unknown_commands_and_missing_required_arguments_exit_with_usage_error() {
 }
 
 #[test]
+fn workspace_mutation_help_describes_explicit_consent() {
+    for command in ["rotate", "remove-env"] {
+        let output = run(&[command, "--help"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let help = stdout(&output);
+        assert!(help.contains("-y, --yes"));
+        assert!(help.contains("workspace vaults without prompting"));
+    }
+}
+
+#[test]
 fn boolean_flags_reject_values_and_unexpected_arguments() {
     for args in [
         vec!["list", "development", "--reveal=true"],
         vec!["set", "development", "KEY", "--plaintext=true"],
         vec!["validate", "one", "two"],
         vec!["rotate", "development", "extra"],
+        vec!["rotate", "development", "--yes=true"],
+        vec!["remove-env", "development", "--yes=true"],
     ] {
         let output = run(&args);
         assert_eq!(

@@ -84,6 +84,10 @@ impl<S: KeyStore> KeyService<S> {
         })
     }
 
+    pub fn vault_names(&self) -> impl Iterator<Item = &str> {
+        self.signature_keys.keys().map(String::as_str)
+    }
+
     fn keys_file(&self) -> models::KeysFile {
         models::KeysFile {
             encryption_keys: self.encryption_keys.clone(),
@@ -2134,9 +2138,14 @@ mod tests {
         std::fs::create_dir(&vault_path).unwrap();
 
         assert!(
-            crate::commands::remove_env_command("development", &mut keys, &mut vault, &workspace)
-                .await
-                .is_err()
+            crate::commands::remove_env_command(
+                "development",
+                &mut keys,
+                std::slice::from_mut(&mut vault),
+                &workspace
+            )
+            .await
+            .is_err()
         );
         let persisted_keys = KeyService::from_store(LocalKeyStore::new(&root.0))
             .await
@@ -2146,6 +2155,113 @@ mod tests {
 
         std::fs::remove_dir(&vault_path).unwrap();
         std::fs::write(&vault_path, original_vault).unwrap();
+    }
+
+    fn transaction_vaults(root: &Path) -> Vec<VaultRegistry> {
+        ["first", "second", "third"]
+            .iter()
+            .map(|name| {
+                let path = root.join(name);
+                std::fs::create_dir(&path).unwrap();
+                let mut vault = VaultRegistry::empty(&path, SIGNING_KEY);
+                vault.set_env_vault(
+                    "development",
+                    IndexMap::from([(
+                        "SECRET".into(),
+                        crypto::encrypt_value(name, ENV_KEY).unwrap(),
+                    )]),
+                );
+                vault.set_env_vault(
+                    "production",
+                    IndexMap::from([("KEEP".into(), "unchanged".into())]),
+                );
+                vault.create().unwrap();
+                vault
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn workspace_operations_restore_earlier_files_after_later_vault_write_failure() {
+        for rotate in [true, false] {
+            let root = TempDir::new("workspace-vault-rollback");
+            write_workspace(&root.0);
+            write_keys(&root.0);
+            let mut keys = KeyService::from_store(LocalKeyStore::new(&root.0))
+                .await
+                .unwrap();
+            let workspace = WorkspaceRegistry::load(&root.0).unwrap();
+            let mut vaults = transaction_vaults(&root.0);
+            let originals: Vec<_> = vaults.iter().map(VaultService::all_env_vaults).collect();
+            let keys_before = std::fs::read(root.0.join(".ramenv.keys")).unwrap();
+            let third_before = std::fs::read(root.0.join("third/.ramenv.vault.toml")).unwrap();
+            let broken_path = root.0.join("second/.ramenv.vault.toml");
+            std::fs::remove_file(&broken_path).unwrap();
+            std::fs::create_dir(&broken_path).unwrap();
+            let result = if rotate {
+                crate::commands::rotate_command("development", &mut keys, &mut vaults, &workspace)
+                    .await
+            } else {
+                crate::commands::remove_env_command(
+                    "development",
+                    &mut keys,
+                    &mut vaults,
+                    &workspace,
+                )
+                .await
+            };
+            let diagnostic = format!("{:#}", result.unwrap_err());
+            assert!(diagnostic.contains("failed to roll back vaults"));
+            let persisted = VaultRegistry::load(&root.0.join("first"), SIGNING_KEY).unwrap();
+            assert_eq!(persisted.all_env_vaults(), originals[0]);
+            assert_eq!(
+                std::fs::read(root.0.join("third/.ramenv.vault.toml")).unwrap(),
+                third_before
+            );
+            assert_eq!(
+                std::fs::read(root.0.join(".ramenv.keys")).unwrap(),
+                keys_before
+            );
+            for (vault, original) in vaults.iter().zip(originals) {
+                assert_eq!(vault.all_env_vaults(), original);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_operations_restore_all_persisted_vaults_after_key_write_failure() {
+        for rotate in [true, false] {
+            let root = TempDir::new("workspace-key-rollback");
+            write_workspace(&root.0);
+            write_keys(&root.0);
+            let mut keys = KeyService::from_store(LocalKeyStore::new(&root.0))
+                .await
+                .unwrap();
+            let workspace = WorkspaceRegistry::load(&root.0).unwrap();
+            let mut vaults = transaction_vaults(&root.0);
+            let originals: Vec<_> = vaults.iter().map(VaultService::all_env_vaults).collect();
+            let keys_path = root.0.join(".ramenv.keys");
+            std::fs::remove_file(&keys_path).unwrap();
+            std::fs::create_dir(&keys_path).unwrap();
+            let result = if rotate {
+                crate::commands::rotate_command("development", &mut keys, &mut vaults, &workspace)
+                    .await
+            } else {
+                crate::commands::remove_env_command(
+                    "development",
+                    &mut keys,
+                    &mut vaults,
+                    &workspace,
+                )
+                .await
+            };
+            assert!(format!("{:#}", result.unwrap_err()).contains("failed to roll back key"));
+            assert_eq!(keys.env_key("development").unwrap(), ENV_KEY);
+            for (name, original) in ["first", "second", "third"].iter().zip(originals) {
+                let persisted = VaultRegistry::load(&root.0.join(name), SIGNING_KEY).unwrap();
+                assert_eq!(persisted.all_env_vaults(), original);
+            }
+        }
     }
 
     #[tokio::test]
@@ -2166,9 +2282,14 @@ mod tests {
         std::fs::create_dir(&keys_path).unwrap();
 
         assert!(
-            crate::commands::rotate_command("development", &mut keys, &mut vault, &workspace)
-                .await
-                .is_err()
+            crate::commands::rotate_command(
+                "development",
+                &mut keys,
+                std::slice::from_mut(&mut vault),
+                &workspace
+            )
+            .await
+            .is_err()
         );
         std::fs::remove_dir(&keys_path).unwrap();
         std::fs::write(&keys_path, original_keys).unwrap();

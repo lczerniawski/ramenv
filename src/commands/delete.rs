@@ -12,7 +12,13 @@ pub fn delete_command(
     let mut validation_rules = vault_service.validation_rules();
 
     if vault.shift_remove(key).is_some() {
-        validation_rules.shift_remove(key);
+        let used_elsewhere = vault_service
+            .all_env_vaults()
+            .iter()
+            .any(|(env, values)| env != environment && values.contains_key(key));
+        if !used_elsewhere {
+            validation_rules.shift_remove(key);
+        }
         vault_service.set_env_vault(environment, vault);
         vault_service.set_validation_rules(validation_rules);
         vault_service.commit()?;
@@ -44,6 +50,32 @@ mod tests {
         assert!(vault.environments["dev"].is_empty());
         assert!(vault.rules.is_empty());
         assert_eq!(vault.commits.get(), 1);
+    }
+
+    #[test]
+    fn preserves_rules_used_by_other_environments() {
+        let mut vault = Vault::with_env("dev", IndexMap::from([("API_KEY".into(), "true".into())]));
+        vault.environments.insert(
+            "production".into(),
+            IndexMap::from([("API_KEY".into(), "invalid".into())]),
+        );
+        vault.rules.insert(
+            "API_KEY".into(),
+            ValidationRule::new(RuleType::Boolean, true),
+        );
+        delete_command("dev", "API_KEY", &mut vault).unwrap();
+        assert!(vault.environments["dev"].is_empty());
+        assert_eq!(vault.environments["production"]["API_KEY"], "invalid");
+        assert!(
+            vault.rules["API_KEY"]
+                .rule_type
+                .validate("API_KEY", "invalid", "production")
+                .is_err()
+        );
+        assert_eq!(vault.commits.get(), 1);
+
+        delete_command("production", "API_KEY", &mut vault).unwrap();
+        assert!(vault.rules.is_empty());
     }
 
     #[test]

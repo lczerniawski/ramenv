@@ -50,88 +50,56 @@ impl RuleType {
                 min_value,
                 max_value,
             } => {
-                let num = value.parse::<i64>().map_err(|_| {
-                    anyhow::anyhow!(
-                        "[{}] Key '{} must be an integer, got: '{}'",
-                        env,
-                        key,
-                        value
-                    )
-                })?;
+                let num = value
+                    .parse::<i64>()
+                    .map_err(|_| anyhow::anyhow!("[{}] Key '{}' must be an integer", env, key))?;
 
                 if let Some(min) = min_value
                     && num < *min
                 {
-                    anyhow::bail!(
-                        "[{}] Key '{}' value {} is too small (min: {})",
-                        env,
-                        key,
-                        num,
-                        min
-                    );
+                    anyhow::bail!("[{}] Key '{}' is too small (min: {})", env, key, min);
                 }
 
                 if let Some(max) = max_value
                     && num > *max
                 {
-                    anyhow::bail!(
-                        "[{}] Key '{}' value {} is too large (max: {})",
-                        env,
-                        key,
-                        num,
-                        max
-                    );
+                    anyhow::bail!("[{}] Key '{}' is too large (max: {})", env, key, max);
                 }
             }
             RuleType::Float {
                 min_value,
                 max_value,
             } => {
-                let num = value.parse::<f64>().map_err(|_| {
-                    anyhow::anyhow!("[{}] Key '{}' must be a float, got: '{}'", env, key, value)
-                })?;
+                let num = value
+                    .parse::<f64>()
+                    .map_err(|_| anyhow::anyhow!("[{}] Key '{}' must be a float", env, key))?;
+                if !num.is_finite() {
+                    anyhow::bail!("[{}] Key '{}' must be a finite float", env, key);
+                }
 
                 if let Some(min) = min_value
                     && num < *min
                 {
-                    anyhow::bail!(
-                        "[{}] Key '{}' value {} is too small (min: {})",
-                        env,
-                        key,
-                        num,
-                        min
-                    );
+                    anyhow::bail!("[{}] Key '{}' is too small (min: {})", env, key, min);
                 }
 
                 if let Some(max) = max_value
                     && num > *max
                 {
-                    anyhow::bail!(
-                        "[{}] Key '{}' value {} is too large (max: {})",
-                        env,
-                        key,
-                        num,
-                        max
-                    );
+                    anyhow::bail!("[{}] Key '{}' is too large (max: {})", env, key, max);
                 }
             }
             RuleType::Boolean => {
                 value.parse::<bool>().map_err(|_| {
-                    anyhow::anyhow!(
-                        "[{}] Key '{}' must be a boolean (true/false), got: '{}'",
-                        env,
-                        key,
-                        value
-                    )
+                    anyhow::anyhow!("[{}] Key '{}' must be a boolean (true/false)", env, key)
                 })?;
             }
             RuleType::Port => {
                 let port = value.parse::<u16>().map_err(|_| {
                     anyhow::anyhow!(
-                        "[{}] Key '{}' must be a valid port number (0-65535), got: '{}'",
+                        "[{}] Key '{}' must be a valid port number (0-65535)",
                         env,
-                        key,
-                        value
+                        key
                     )
                 })?;
 
@@ -141,22 +109,12 @@ impl RuleType {
             }
             RuleType::Uri => {
                 url::Url::parse(value).map_err(|_| {
-                    anyhow::anyhow!(
-                        "[{}] Key '{}' must be a valid URI/URL, got: '{}'",
-                        env,
-                        key,
-                        value
-                    )
+                    anyhow::anyhow!("[{}] Key '{}' must be a valid URI/URL", env, key)
                 })?;
             }
             RuleType::IP => {
                 value.parse::<IpAddr>().map_err(|_| {
-                    anyhow::anyhow!(
-                        "[{}] Key '{}' must be a valid IP address, got: '{}'",
-                        env,
-                        key,
-                        value
-                    )
+                    anyhow::anyhow!("[{}] Key '{}' must be a valid IP address", env, key)
                 })?;
             }
             RuleType::Email => {
@@ -164,12 +122,7 @@ impl RuleType {
                     || value.trim().starts_with("@")
                     || value.trim().ends_with("@")
                 {
-                    anyhow::bail!(
-                        "[{}] Key '{}' must be a valid email address, got: '{}'",
-                        env,
-                        key,
-                        value
-                    );
+                    anyhow::bail!("[{}] Key '{}' must be a valid email address", env, key);
                 }
             }
             RuleType::Regex { pattern } => {
@@ -184,10 +137,9 @@ impl RuleType {
 
                 if !re.is_match(value) {
                     anyhow::bail!(
-                        "[{}] Key '{}' does not match the required pattern, got: '{}'",
+                        "[{}] Key '{}' does not match the required pattern",
                         env,
-                        key,
-                        value
+                        key
                     );
                 }
             }
@@ -272,10 +224,7 @@ mod tests {
             max_value: None,
         };
         let err = rule.validate("PORT", "not_an_int", ENV).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "[test-env] Key 'PORT must be an integer, got: 'not_an_int'"
-        );
+        assert_eq!(err.to_string(), "[test-env] Key 'PORT' must be an integer");
     }
 
     #[test]
@@ -287,7 +236,7 @@ mod tests {
         let err = rule.validate("PORT", "5", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'PORT' value 5 is too small (min: 10)"
+            "[test-env] Key 'PORT' is too small (min: 10)"
         );
     }
 
@@ -300,7 +249,7 @@ mod tests {
         let err = rule.validate("PORT", "55", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'PORT' value 55 is too large (max: 50)"
+            "[test-env] Key 'PORT' is too large (max: 50)"
         );
     }
 
@@ -320,10 +269,7 @@ mod tests {
             max_value: None,
         };
         let err = rule.validate("RATE", "abc", ENV).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "[test-env] Key 'RATE' must be a float, got: 'abc'"
-        );
+        assert_eq!(err.to_string(), "[test-env] Key 'RATE' must be a float");
     }
 
     #[test]
@@ -335,7 +281,7 @@ mod tests {
         let err = rule.validate("RATE", "1.9", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'RATE' value 1.9 is too small (min: 2)"
+            "[test-env] Key 'RATE' is too small (min: 2)"
         );
     }
 
@@ -348,7 +294,7 @@ mod tests {
         let err = rule.validate("RATE", "10.1", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'RATE' value 10.1 is too large (max: 10)"
+            "[test-env] Key 'RATE' is too large (max: 10)"
         );
     }
 
@@ -365,7 +311,7 @@ mod tests {
         let err = rule.validate("DEBUG", "yes", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'DEBUG' must be a boolean (true/false), got: 'yes'"
+            "[test-env] Key 'DEBUG' must be a boolean (true/false)"
         );
     }
 
@@ -381,7 +327,7 @@ mod tests {
         let err = rule.validate("APP_PORT", "70000", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'APP_PORT' must be a valid port number (0-65535), got: '70000'"
+            "[test-env] Key 'APP_PORT' must be a valid port number (0-65535)"
         );
     }
 
@@ -410,7 +356,7 @@ mod tests {
         let err = rule.validate("URL", "not-a-valid-uri", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'URL' must be a valid URI/URL, got: 'not-a-valid-uri'"
+            "[test-env] Key 'URL' must be a valid URI/URL"
         );
     }
 
@@ -427,7 +373,7 @@ mod tests {
         let err = rule.validate("HOST", "256.0.0.1", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'HOST' must be a valid IP address, got: '256.0.0.1'"
+            "[test-env] Key 'HOST' must be a valid IP address"
         );
     }
 
@@ -480,7 +426,7 @@ mod tests {
         let err = rule.validate("SERIAL", "abc-123", ENV).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "[test-env] Key 'SERIAL' does not match the required pattern, got: 'abc-123'"
+            "[test-env] Key 'SERIAL' does not match the required pattern"
         );
     }
 
@@ -494,6 +440,26 @@ mod tests {
             err.to_string(),
             "[test-env] Key 'SERIAL' has an invalid regex pattern: '[unclosed-bracket'"
         );
+    }
+
+    #[test]
+    fn floats_reject_non_finite_values_with_or_without_bounds() {
+        for rule in [
+            RuleType::Float {
+                min_value: None,
+                max_value: None,
+            },
+            RuleType::Float {
+                min_value: Some(0.0),
+                max_value: Some(1.0),
+            },
+        ] {
+            for value in ["NaN", "inf", "-inf", "Infinity", "-Infinity", "1e999"] {
+                let error = rule.validate("RATE", value, ENV).unwrap_err();
+                assert!(error.to_string().contains("must be a finite float"));
+            }
+            assert!(rule.validate("RATE", "0.5", ENV).is_ok());
+        }
     }
 
     #[test]
