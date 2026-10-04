@@ -24,7 +24,7 @@ pub mod validation;
 #[derive(Parser, Debug)]
 #[command(
     name = "ramenv",
-    version = "0.1.0",
+    version,
     about = "Secure Environment Variable Manager"
 )]
 enum Cli {

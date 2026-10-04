@@ -53,8 +53,25 @@ fn bin_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ramenv"))
 }
 
-fn env_printer_bin_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_env_printer"))
+fn build_env_printer(workspace: &Path) -> PathBuf {
+    // Keep the subprocess fixture out of Cargo's installable binary targets.
+    // Build it inside the workspace so each test cleans up its own executable.
+    let binary = workspace.join(format!("env_printer{}", std::env::consts::EXE_SUFFIX));
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bin/env_printer.rs");
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Command::new(rustc)
+        .arg("--edition=2024")
+        .arg(source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("compile env_printer test helper with rustc");
+    assert!(
+        output.status.success(),
+        "Failed to compile env_printer test helper: {}",
+        stderr(&output)
+    );
+    binary
 }
 
 fn run_execute(workspace: &Path, environment: &str, command_args: &[&str]) -> Output {
@@ -164,7 +181,7 @@ fn run_command_injects_decrypted_variables_into_subprocess() {
         )],
     );
 
-    let printer_bin = env_printer_bin_path();
+    let printer_bin = build_env_printer(workspace.path());
     let printer_str = printer_bin.to_str().unwrap();
 
     let output = run_execute(
@@ -236,7 +253,7 @@ fn run_command_propagates_the_child_exit_code() {
     write_workspace_file(workspace.path());
     write_keys_file(workspace.path(), &[("development", KEY_HEX)]);
     write_vault_file(workspace.path(), &[("development", vec![])]);
-    let printer = env_printer_bin_path();
+    let printer = build_env_printer(workspace.path());
     let output = run_execute(
         workspace.path(),
         "development",

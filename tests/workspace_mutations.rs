@@ -270,14 +270,16 @@ fn noninteractive_workspace_changes_require_explicit_consent_without_writing() {
             let snapshot = snapshot_files(&workspace.0);
             let output = run(&workspace.0.join(cwd_name), command, &["development"]);
             assert_eq!(output.status.code(), Some(1));
+            let scope = String::from_utf8_lossy(&output.stdout);
+            assert!(scope.contains("environment 'development'"));
+            assert!(scope.contains("all 2 affected workspace vault(s)"));
+            assert!(scope.contains("Affected vaults:"));
+            assert!(scope.contains(SERVICES[0]));
+            assert!(scope.contains(SERVICES[1]));
+            assert!(!scope.contains(SERVICES[2]));
+            assert!(scope.contains("shared encryption key"));
             let diagnostic = String::from_utf8_lossy(&output.stderr);
-            assert!(diagnostic.contains("environment 'development'"));
-            assert!(diagnostic.contains("all 2 affected workspace vault(s)"));
-            assert!(diagnostic.contains("Affected vaults:"));
-            assert!(diagnostic.contains(SERVICES[0]));
-            assert!(diagnostic.contains(SERVICES[1]));
-            assert!(!diagnostic.contains(SERVICES[2]));
-            assert!(diagnostic.contains("shared encryption key"));
+            assert!(diagnostic.contains("require confirmation"));
             assert!(diagnostic.contains("--yes (or -y)"));
             assert_unchanged(snapshot);
         }
@@ -296,11 +298,12 @@ fn monorepo_requires_consent_even_if_only_one_vault_has_the_environment() {
         let snapshot = snapshot_files(&workspace.0);
         let output = run(&service, command, &["development"]);
         assert_eq!(output.status.code(), Some(1));
+        let scope = String::from_utf8_lossy(&output.stdout);
+        assert!(scope.contains("all 1 affected workspace vault(s)"));
+        assert!(scope.contains(SERVICES[1]));
+        assert!(!scope.contains(SERVICES[0]));
+        assert!(!scope.contains(SERVICES[2]));
         let diagnostic = String::from_utf8_lossy(&output.stderr);
-        assert!(diagnostic.contains("all 1 affected workspace vault(s)"));
-        assert!(diagnostic.contains(SERVICES[1]));
-        assert!(!diagnostic.contains(SERVICES[0]));
-        assert!(!diagnostic.contains(SERVICES[2]));
         assert!(diagnostic.contains("require confirmation"));
         assert_unchanged(snapshot);
     }

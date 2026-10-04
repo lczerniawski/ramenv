@@ -24,7 +24,10 @@ fn root_help_and_version_are_available_without_a_workspace() {
 
     let version = run(&["--version"]);
     assert!(version.status.success());
-    assert_eq!(stdout(&version).trim(), "ramenv 0.1.0");
+    assert_eq!(
+        stdout(&version).trim(),
+        concat!("ramenv ", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
