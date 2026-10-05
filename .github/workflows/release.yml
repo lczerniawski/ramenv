@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Match tag to Cargo.toml
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+
+          with open('Cargo.toml', 'rb') as manifest:
+              version = tomllib.load(manifest)['package']['version']
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', version):
+              raise SystemExit(f'Unsupported release version: {version!r}')
+          expected = f'v{version}'
+          if os.environ['RELEASE_TAG'] != expected:
+              raise SystemExit(f'Release tag must be {expected}, matching Cargo.toml')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
+          PY
+
+  checks:
+    name: Release checks
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: [validate, checks]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      ASSET_NAME: ramenv-v${{ needs.validate.outputs.version }}-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            extension: ''
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            extension: ''
+          - os: macos-15
+            target: aarch64-apple-darwin
+            extension: ''
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            extension: '.exe'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.96
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --locked --bin ramenv --target ${{ matrix.target }}
+      - name: Smoke-test release binary
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          BINARY: target/${{ matrix.target }}/release/ramenv${{ matrix.extension }}
+        run: |
+          "$BINARY" --help
+          test "$("$BINARY" --version)" = "ramenv $RELEASE_VERSION"
+      - name: Stage binary and documentation
+        env:
+          BINARY: target/${{ matrix.target }}/release/ramenv${{ matrix.extension }}
+        run: |
+          mkdir -p "package/$ASSET_NAME/docs" dist
+          cp "$BINARY" "package/$ASSET_NAME/"
+          cp README.md LICENSE "package/$ASSET_NAME/"
+          cp docs/*.md "package/$ASSET_NAME/docs/"
+      - name: Create Linux/macOS archive
+        if: runner.os != 'Windows'
+        run: |
+          chmod 755 "package/$ASSET_NAME/ramenv"
+          COPYFILE_DISABLE=1 tar -czf "dist/$ASSET_NAME.tar.gz" -C package "$ASSET_NAME"
+      - name: Create Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          Compress-Archive
+          -Path "package/${env:ASSET_NAME}"
+          -DestinationPath "dist/${env:ASSET_NAME}.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ramenv-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: ramenv-*
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Create draft, upload assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          flags=()
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag --draft --generate-notes \
+            --title "ramenv $RELEASE_TAG" "${flags[@]}"
+          gh release edit "$RELEASE_TAG" --draft=false

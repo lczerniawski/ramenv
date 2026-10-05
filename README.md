@@ -37,6 +37,8 @@ ramenv run development -- python app.py
 
 Install from crates.io with Cargo and a recent stable [Rust toolchain](https://www.rust-lang.org/tools/install):
 
+Alternatively, prebuilt binaries for Linux x86_64, macOS Intel/Apple Silicon, and Windows x86_64 are available from [GitHub Releases](https://github.com/lczerniawski/ramenv/releases). Extract the archive for your platform and put `ramenv` (`ramenv.exe` on Windows) on your `PATH`. See [release documentation](docs/releases.md#downloadable-assets) for checksums and platform requirements.
+
 ```sh
 cargo install ramenv --locked
 ramenv --help
@@ -332,6 +334,8 @@ cargo clippy --locked --all-targets
 ```
 
 The CLI implementation is in [`src/`](src/), integration tests are in [`tests/`](tests/), and cloud authentication guides are in [`docs/`](docs/).
+
+GitHub Actions runs formatting, Clippy, and tests on Linux, macOS, and Windows. Pushing a version tag such as `v1.0.0` runs the checks again and publishes native binaries to GitHub Releases. See [CI and release instructions](docs/releases.md) for the release process and setup.
 
 ## License
 
