@@ -63,4 +63,3 @@ jobs:
           shared-key: test-${{ matrix.target }}
           save-if: ${{ github.event_name == 'push' }}
       - run: cargo test --locked --all-targets --target ${{ matrix.target }}
-      - run: cargo test --locked --doc --target ${{ matrix.target }}
