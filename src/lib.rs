@@ -24,6 +24,7 @@ pub mod validation;
 #[derive(Parser, Debug)]
 #[command(
     name = "ramenv",
+    bin_name = "ramenv",
     version,
     about = "Secure Environment Variable Manager"
 )]
@@ -428,6 +429,18 @@ mod tests {
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn cli_help_uses_a_platform_independent_binary_name() {
+        for executable in ["ramenv", "ramenv.exe"] {
+            let help = Cli::try_parse_from([executable, "--help"]).unwrap_err();
+            assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+            assert!(
+                help.to_string().contains("Usage: ramenv <COMMAND>"),
+                "unexpected help for {executable}: {help}"
+            );
         }
     }
 
