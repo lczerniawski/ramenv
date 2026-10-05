@@ -261,16 +261,8 @@ async fn execute_with_store<S: services::KeyStore>(
             _ => unreachable!(),
         };
     }
-    let vault_path = current_working_path
-        .strip_prefix(&root)?
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("invalid vault path"))?;
-    let vault_path = if vault_path.is_empty() {
-        "/"
-    } else {
-        vault_path
-    };
-    let vault_signature_key = key_service.vault_signature_key(vault_path)?;
+    let vault_name = utils::vault_name(current_working_path, &root)?;
+    let vault_signature_key = key_service.vault_signature_key(&vault_name)?;
     let mut vault_registry =
         services::VaultRegistry::load(current_working_path, vault_signature_key)?;
 

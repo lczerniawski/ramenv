@@ -212,11 +212,8 @@ async fn init_vault_file(
     }
 
     let workspace_root = workspace_registry.get_workspace_root();
-    let vault_name = current_working_path
-        .strip_prefix(&workspace_root)?
-        .to_str()
-        .map(|s| if s.is_empty() { "/" } else { s })
-        .unwrap_or("/");
+    let vault_name = crate::utils::vault_name(current_working_path, &workspace_root)?;
+    let vault_name = vault_name.as_str();
 
     match workspace_registry.get_provider() {
         Provider::Local => {

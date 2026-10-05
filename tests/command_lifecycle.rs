@@ -176,13 +176,30 @@ fn workspace_and_service_init_support_a_nested_monorepo() {
     assert_success(&run(&workspace.0, &["init", "workspace"]));
     assert!(!workspace.0.join(".ramenv.vault.toml").exists());
 
-    let service = workspace.0.join("services/api");
+    let service = workspace.0.join("services").join("api");
     std::fs::create_dir_all(&service).unwrap();
     assert_success(&run(&service, &["init", "service"]));
     assert!(service.join(".ramenv.vault.toml").exists());
     let keys = read_keys(&workspace.0);
-    assert!(keys.signature_keys.contains_key("services/api"));
+    assert!(
+        keys.signature_keys.contains_key("services/api"),
+        "unexpected vault names: {:?}",
+        keys.signature_keys.keys().collect::<Vec<_>>()
+    );
     assert_valid_signature(&read_vault(&service), &keys.signature_keys["services/api"]);
+
+    // Runtime lookup and workspace-wide loading must agree with the persisted name.
+    assert_success(&run(&service, &["list", "development"]));
+    assert_success(&run(&service, &["create-env", "staging"]));
+    assert_success(&run(&workspace.0, &["rotate", "staging", "--yes"]));
+    assert_valid_signature(&read_vault(&service), &keys.signature_keys["services/api"]);
+    assert_success(&run(&workspace.0, &["remove-env", "staging", "--yes"]));
+    assert!(
+        !read_keys(&workspace.0)
+            .encryption_keys
+            .contains_key("staging")
+    );
+    assert!(!read_vault(&service).environments.contains_key("staging"));
 }
 
 #[test]

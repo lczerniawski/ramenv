@@ -1,5 +1,23 @@
 use crate::crypto;
 use anyhow::Result;
+use std::path::Path;
+
+/// Use portable names in key files, independent of the host's path separator.
+pub fn vault_name(current_working_path: &Path, workspace_root: &Path) -> Result<String> {
+    let relative = current_working_path.strip_prefix(workspace_root)?;
+    let parts = relative
+        .iter()
+        .map(|part| {
+            part.to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid vault path"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if parts.is_empty() {
+        Ok("/".to_string())
+    } else {
+        Ok(parts.join("/"))
+    }
+}
 
 pub fn mask_secret(secret: &str) -> String {
     let characters: Vec<char> = secret.chars().collect();
@@ -51,6 +69,18 @@ mod tests {
     use super::*;
 
     const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[test]
+    fn vault_names_use_forward_slashes_for_native_paths() {
+        let root = std::env::temp_dir().join("ramenv-vault-names");
+        assert_eq!(vault_name(&root, &root).unwrap(), "/");
+        assert_eq!(vault_name(&root.join("api"), &root).unwrap(), "api");
+        assert_eq!(
+            vault_name(&root.join("services").join("api"), &root).unwrap(),
+            "services/api"
+        );
+        assert!(vault_name(&root.parent().unwrap().join("outside"), &root).is_err());
+    }
 
     #[test]
     fn mask_secret_handles_each_visibility_boundary() {
